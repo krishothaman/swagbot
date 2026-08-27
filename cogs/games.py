@@ -20,26 +20,60 @@ class Games(commands.Cog):
         app_commands.Choice(name="Tails", value="tails"),
     ])
     async def coinflip(self, interaction: discord.Interaction, bet: int, choice: app_commands.Choice[str]):
-        # TODO (Czar):
-        # 1. Validate bet >= MIN_BET and user has enough balance
-        # 2. result = random.choice(["heads", "tails"])
-        # 3. If result == choice.value -> win, award e.g. 2x bet
-        #    else -> lose, deduct bet
-        # 4. Respond showing the result and new balance
-        pass
+        if bet < MIN_BET:
+            await interaction.response.send_message(f"Minimum bet is **{MIN_BET}** coins.", ephemeral=True)
+            return
+
+        balance = await db.get_balance(interaction.user.id, interaction.guild.id)
+        if balance < bet:
+            await interaction.response.send_message(
+                f"You don't have enough coins. Your balance: **{balance}**", ephemeral=True
+            )
+            return
+
+        result = random.choice(["heads", "tails"])
+        won = result == choice.value
+        payout = bet if won else -bet
+        new_balance = await db.update_balance(interaction.user.id, interaction.guild.id, payout)
+
+        outcome = f"🎉 It landed on **{result}** - you win **{bet}** coins!" if won \
+            else f"💀 It landed on **{result}** - you lose **{bet}** coins."
+
+        await interaction.response.send_message(f"{outcome}\nNew balance: **{new_balance}**")
 
     @app_commands.command(name="slots", description="Spin the slot machine")
     @app_commands.describe(bet="How many coins to bet")
     async def slots(self, interaction: discord.Interaction, bet: int):
-        # TODO (Czar):
-        # 1. Validate bet >= MIN_BET and user has enough balance
-        # 2. Spin 3 random symbols: [random.choice(SLOT_SYMBOLS) for _ in range(3)]
-        # 3. Decide payout rules yourself, e.g.:
-        #      - all 3 match -> big win (5x-10x bet)
-        #      - 2 match -> small win (2x bet)
-        #      - no match -> lose the bet
-        # 4. Respond showing the spin result (e.g. "🍒 | 🍋 | 🍒") and outcome
-        pass
+        if bet < MIN_BET:
+            await interaction.response.send_message(f"Minimum bet is **{MIN_BET}** coins.", ephemeral=True)
+            return
+
+        balance = await db.get_balance(interaction.user.id, interaction.guild.id)
+        if balance < bet:
+            await interaction.response.send_message(
+                f"You don't have enough coins. Your balance: **{balance}**", ephemeral=True
+            )
+            return
+
+        spin = [random.choice(SLOT_SYMBOLS) for _ in range(3)]
+        display = " | ".join(spin)
+
+        if spin[0] == spin[1] == spin[2]:
+            payout = bet * 10
+            outcome = f"🎰 JACKPOT! All three match! +{payout} coins"
+        elif spin[0] == spin[1] or spin[1] == spin[2] or spin[0] == spin[2]:
+            payout = bet * 2
+            outcome = f"🎰 Two match! +{payout} coins"
+        else:
+            payout = -bet
+            outcome = f"🎰 No match. {payout} coins"
+
+        new_balance = await db.update_balance(interaction.user.id, interaction.guild.id, payout)
+
+        embed = discord.Embed(title="Slots", description=display, color=discord.Color.purple())
+        embed.add_field(name="Result", value=outcome, inline=False)
+        embed.set_footer(text=f"New balance: {new_balance}")
+        await interaction.response.send_message(embed=embed)
 
 
 async def setup(bot: commands.Bot):
