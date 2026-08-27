@@ -17,7 +17,7 @@ quests
 exploration
 player properties
 server events
-more random shit as i build
+more random stuff as i build
 # TECH STACK
 Python 3
 discord.py (bot framework, slash commands, UI buttons)
