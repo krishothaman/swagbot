@@ -1,4 +1,4 @@
-# GOT SWAG BOT
+# SWAG BOT
 
 a discord bot where you can make money, talk to ai npcs, and build your own apartment.
 
