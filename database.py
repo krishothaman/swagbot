@@ -1,12 +1,3 @@
-"""
-Shared database layer.
-
-Design decision: economy balance and leveling XP live in the SAME `users`
-table (one row per user PER SERVER, since balances/levels shouldn't
-carry across servers). Every cog imports functions from here instead of
-touching sqlite directly - keeps the "does this user exist yet" logic
-in one place.
-"""
 
 import aiosqlite
 import time
@@ -32,7 +23,186 @@ async def init_db():
             PRIMARY KEY (user_id, guild_id)
         )
     """)
+    await _db.execute("""
+        CREATE TABLE IF NOT EXISTS npcs (
+            npc_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            role TEXT NOT NULL,
+            greeting_text TEXT NOT NULL
+        )
+    """)
+    await _db.execute("""
+        CREATE TABLE IF NOT EXISTS items (
+            item_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            price INTEGER NOT NULL,
+            npc_id TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT ''
+        )
+    """)
+    await _db.execute("""
+        CREATE TABLE IF NOT EXISTS inventory (
+            user_id INTEGER NOT NULL,
+            guild_id INTEGER NOT NULL,
+            item_id TEXT NOT NULL,
+            quantity INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY (user_id, guild_id, item_id)
+        )
+    """)
+    await _db.execute("""
+        CREATE TABLE IF NOT EXISTS quests (
+            quest_id TEXT PRIMARY KEY,
+            npc_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            description TEXT NOT NULL,
+            reward_coins INTEGER NOT NULL DEFAULT 0,
+            reward_xp INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    await _db.execute("""
+        CREATE TABLE IF NOT EXISTS player_quests (
+            user_id INTEGER NOT NULL,
+            guild_id INTEGER NOT NULL,
+            quest_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active',
+            PRIMARY KEY (user_id, guild_id, quest_id)
+        )
+    """)
     await _db.commit()
+async def seed_npc_data():
+    db = get_db()
+
+    await db.execute(
+        "INSERT OR IGNORE INTO npcs (npc_id, name, role, greeting_text) VALUES (?, ?, ?, ?)",
+        ("shady_merchant", "Shady Merchant", "merchant",
+         "i got the stuff, what do you want?"),
+    )
+
+    items = [
+        ("lockpick", "Lockpick", 150, "shady_merchant", "yk what to do with it."),
+        ("fake_id", "Fake ID", 300, "shady_merchant", "you can use it for whatever the heck you want."),
+        ("lucky_coin", "Lucky Coin", 500, "shady_merchant", "hehe."),
+    ]
+    await db.executemany(
+        "INSERT OR IGNORE INTO items (item_id, name, price, npc_id, description) VALUES (?, ?, ?, ?, ?)",
+        items,
+    )
+
+    await db.execute(
+        "INSERT OR IGNORE INTO quests (quest_id, npc_id, title, description, reward_coins, reward_xp) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("first_errand", "shady_merchant", "Run an Errand",
+         "dont you back off now...", 200, 50),
+    )
+
+    await db.commit()
+async def get_npc(npc_id: str):
+    db = get_db()
+    async with db.execute(
+        "SELECT npc_id, name, role, greeting_text FROM npcs WHERE npc_id = ?", (npc_id,)
+    ) as cursor:
+        return await cursor.fetchone()
+async def get_items_for_npc(npc_id: str):
+    db = get_db()
+    async with db.execute(
+        "SELECT item_id, name, price, description FROM items WHERE npc_id = ?", (npc_id,)
+    ) as cursor:
+        return await cursor.fetchall()
+async def get_item(item_id: str):
+    db = get_db()
+    async with db.execute(
+        "SELECT item_id, name, price, npc_id, description FROM items WHERE item_id = ?", (item_id,)
+    ) as cursor:
+        return await cursor.fetchone()
+async def get_player_items(user_id: int, guild_id: int):
+    db = get_db()
+    async with db.execute(
+        "SELECT item_id, quantity FROM inventory WHERE user_id = ? AND guild_id = ?",
+        (user_id, guild_id),
+    ) as cursor:
+        return await cursor.fetchall()
+async def add_item_to_inventory(user_id: int, guild_id: int, item_id: str, quantity: int = 1):
+    db = get_db()
+    await db.execute(
+        """INSERT INTO inventory (user_id, guild_id, item_id, quantity)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(user_id, guild_id, item_id)
+           DO UPDATE SET quantity = quantity + excluded.quantity""",
+        (user_id, guild_id, item_id, quantity),
+    )
+    await db.commit()
+
+async def remove_item_from_inventory(user_id: int, guild_id: int, item_id: str, quantity: int = 1):
+    db = get_db()
+
+    async with db.execute(
+        "SELECT quantity FROM inventory WHERE user_id = ? AND guild_id = ? AND item_id = ?", 
+        (user_id,guild_id,item_id),
+        
+    
+    ) as cursor: 
+        row = await cursor.fetchone()
+
+    owned = row[0] if row else 0
+    if owned < quantity:
+        return False  # negative value
+
+    if owned == quantity:
+        
+        await db.execute(
+            "DELETE FROM inventory WHERE user_id = ? AND guild_id = ? AND item_id = ?",
+            (user_id, guild_id, item_id),
+        )
+    else:
+        await db.execute(
+            "UPDATE inventory SET quantity = quantity - ? WHERE user_id = ? AND guild_id = ? AND item_id = ?",
+            (quantity, user_id, guild_id, item_id),
+        )
+
+    await db.commit()
+    return True
+
+
+async def get_inventory(user_id: int, guild_id: int):
+    db = get_db()
+    async with db.execute(
+        """SELECT items.name, inventory.quantity FROM inventory
+           JOIN items ON items.item_id = inventory.item_id
+           WHERE inventory.user_id = ? AND inventory.guild_id = ?""",
+        (user_id, guild_id),
+    ) as cursor:
+        return await cursor.fetchall()
+async def get_quests_for_npc(npc_id: str):
+    db = get_db()
+    async with db.execute(
+        "SELECT quest_id, title, description, reward_coins, reward_xp FROM quests WHERE npc_id = ?",
+        (npc_id,),
+    ) as cursor:
+        return await cursor.fetchall()
+
+
+async def get_player_quest_status(user_id: int, guild_id: int, quest_id: str):
+    """Returns 'available' if no row exists yet."""
+    db = get_db()
+    async with db.execute(
+        "SELECT status FROM player_quests WHERE user_id = ? AND guild_id = ? AND quest_id = ?",
+        (user_id, guild_id, quest_id),
+    ) as cursor:
+        row = await cursor.fetchone()
+        return row[0] if row else "available"
+
+
+async def set_player_quest_status(user_id: int, guild_id: int, quest_id: str, status: str):
+    db = get_db()
+    await db.execute(
+        """INSERT INTO player_quests (user_id, guild_id, quest_id, status)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(user_id, guild_id, quest_id) DO UPDATE SET status = excluded.status""",
+        (user_id, guild_id, quest_id, status),
+    )
+    await db.commit()
+
+
 
 
 def get_db() -> aiosqlite.Connection:
@@ -42,8 +212,7 @@ def get_db() -> aiosqlite.Connection:
 
 
 async def ensure_user(user_id: int, guild_id: int):
-    """Insert a row for this user in this guild if one doesn't exist yet.
-    Call this at the top of any command that reads/writes user data."""
+    "uhh basically checks the user is in db, if not adds them"
     db = get_db()
     await db.execute(
         """INSERT OR IGNORE INTO users (user_id, guild_id, balance)

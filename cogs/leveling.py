@@ -9,9 +9,7 @@ from config import XP_PER_MESSAGE_MIN, XP_PER_MESSAGE_MAX, XP_MESSAGE_COOLDOWN_S
 
 
 def xp_needed_for_level(level: int) -> int:
-    """XP required to go from `level` to `level + 1`.
-    Formula: 5 * (level^2) + 50 * level + 100 - increases each level."""
-    return 5 * (level ** 2) + 50 * level + 100
+    return 3 * (level ** 2) + 25 * level + 75
 
 
 class Leveling(commands.Cog):
