@@ -76,6 +76,55 @@ class SellView(discord.ui.View):
             return
         await db.update_balance(self.user_id, self.guild_id, sell_price)
         await interaction.response.send_message(f"You sold {name} for {sell_price} coins", ephemeral=True)
+class QuestView(discord.ui.View):
+    def __init__(self, user_id: int, guild_id: int, quest_id: str, status: str, reward_coins: int, reward_xp: int):
+        super().__init__(timeout=60)
+        self.user_id = user_id
+        self.guild_id = guild_id
+        self.quest_id = quest_id
+        self.reward_coins = reward_coins
+        self.reward_xp = reward_xp
+
+        if status == "available":
+            self.add_item(self.AcceptButton(self))
+        elif status == "active":
+            self.add_item(self.CompleteButton(self))
+
+    class AcceptButton(discord.ui.Button):
+        def __init__(self, parent_view):
+            super().__init__(label="Accept Quest", style=discord.ButtonStyle.primary)
+            self.parent_view = parent_view
+
+        async def callback(self, interaction: discord.Interaction):
+            if interaction.user.id != self.parent_view.user_id:
+                await interaction.response.send_message("Not your quest, selfish f**k", ephemeral=True)
+                return
+            await db.set_player_quest_status(
+                self.parent_view.user_id, self.parent_view.guild_id, self.parent_view.quest_id, "active"
+            )
+            await interaction.response.edit_message(
+                content="you got it.", embed=None, view=None
+            )
+
+    class CompleteButton(discord.ui.Button):
+        def __init__(self, parent_view):
+            super().__init__(label="Turn In Quest", style=discord.ButtonStyle.success)
+            self.parent_view = parent_view
+
+        async def callback(self, interaction: discord.Interaction):
+            if interaction.user.id != self.parent_view.user_id:
+                await interaction.response.send_message("Not your quest gng.", ephemeral=True)
+                return
+            await db.set_player_quest_status(
+                self.parent_view.user_id, self.parent_view.guild_id, self.parent_view.quest_id, "completed"
+            )
+            await db.update_balance(self.parent_view.user_id, self.parent_view.guild_id, self.parent_view.reward_coins)
+            await db.add_xp(self.parent_view.user_id, self.parent_view.guild_id, self.parent_view.reward_xp)
+            await interaction.response.edit_message(
+                content=f"ayy you actually did it, gng. +{self.parent_view.reward_coins} coins, +{self.parent_view.reward_xp} xp",
+                embed=None,
+                view=None,
+            )
         
             
 
@@ -89,7 +138,7 @@ class NPCActionView(discord.ui.View):
 
     async def _guard(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.user_id:
-            await interaction.response.send_message("not your convo gng",ephemeral=True)
+            await interaction.response.send_message("not your convo.",ephemeral=True)
             return False
         return True    
 
@@ -117,6 +166,28 @@ class NPCActionView(discord.ui.View):
         view = SellView(self.user_id, self.guild_id, inventory)
         await interaction.response.send_message("Sellin what?", view=view, ephemeral=True)
 
+    @discord.ui.button(label="Quests", style=discord.ButtonStyle.success)
+    async def quests_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._guard(interaction):
+            return
+
+        quests = await db.get_quests_for_npc(self.npc_id)
+        if not quests:
+            await interaction.response.send_message("No quests here right now.", ephemeral=True)
+            return
+
+        for quest_id, title, description, reward_coins, reward_xp in quests:
+            status = await db.get_player_quest_status(self.user_id, self.guild_id, quest_id)
+            if status != "completed":
+                view = QuestView(self.user_id, self.guild_id, quest_id, status, reward_coins, reward_xp)
+                embed = discord.Embed(title=title, description=description, color=discord.Color.blue())
+                embed.add_field(name="Reward", value=f"{reward_coins} coins, {reward_xp} xp")
+            embed.add_field(name="Status", value=status.capitalize())
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+            return
+
+        await interaction.response.send_message("you have done everything for now. return back later", ephemeral=True)
+
 
 class NPC(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -124,12 +195,12 @@ class NPC(commands.Cog):
 
     @app_commands.command(name="talk", description="Talk to an NPC")
     @app_commands.choices(npc=[
-        app_commands.Choice(name="Shady Merchant", value="shady_merchant"),
+        app_commands.Choice(name="Weird looking merchant", value="weird_merchant"),
     ])
     async def talk(self, interaction: discord.Interaction, npc: app_commands.Choice[str]):
         npc_data = await db.get_npc(npc.value)
         if npc_data is None:
-            await interaction.response.send_message("That NPC doesn't exist.", ephemeral=True)
+            await interaction.response.send_message("That NPC doesn't exist. Schizophrenic?", ephemeral=True)
             return
 
         npc_id, name, role, greeting = npc_data
@@ -142,7 +213,7 @@ class NPC(commands.Cog):
     async def inventory(self, interaction: discord.Interaction):
         items = await db.get_inventory(interaction.user.id, interaction.guild.id)
         if not items:
-            await interaction.response.send_message("Your inventory's empty, cuh. Go buy something.")
+            await interaction.response.send_message("You got nothin on u rn.")
             return
 
         lines = [f"**{name}** x{qty}" for item_id, name, qty in items]
