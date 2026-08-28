@@ -166,7 +166,7 @@ async def remove_item_from_inventory(user_id: int, guild_id: int, item_id: str, 
 async def get_inventory(user_id: int, guild_id: int):
     db = get_db()
     async with db.execute(
-        """SELECT items.name, inventory.quantity FROM inventory
+        """SELECT inventory.item_id ,items.name, inventory.quantity FROM inventory
            JOIN items ON items.item_id = inventory.item_id
            WHERE inventory.user_id = ? AND inventory.guild_id = ?""",
         (user_id, guild_id),

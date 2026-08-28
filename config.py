@@ -9,6 +9,7 @@ COMMAND_PREFIX = "!"  # only used for legacy text commands, we're mainly using s
 
 # --- Database ---
 DB_PATH = "data/bot.db"
+SELL_PRICE_RATIO = 0.75
 
 # --- Economy constants ---
 STARTING_BALANCE = 100
