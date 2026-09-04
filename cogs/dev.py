@@ -212,6 +212,16 @@ class Dev(commands.Cog):
             f"✅ Removed {target.display_name}'s **{house[1]}**.{note}", ephemeral=True
         )
 
+    @dev.command(name="heal", description="[owner] Clear a heist lockout (being shot)")
+    @owner_only()
+    @app_commands.describe(member="Defaults to you")
+    async def heal(self, interaction: discord.Interaction, member: discord.Member = None):
+        target = self._target(interaction, member)
+        await db.clear_incapacitated(target.id, interaction.guild.id)
+        await interaction.response.send_message(
+            f"✅ {target.display_name} is patched up and free to act.", ephemeral=True
+        )
+
     # --- Inspection ---
 
     @dev.command(name="inspect", description="[owner] Dump someone's raw DB state")

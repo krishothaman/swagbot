@@ -28,6 +28,16 @@ DAILY_COOLDOWN_SECONDS = 60 * 60 * 24    # 24 hours
 # --- Blackjack / games constants ---
 MIN_BET = 10
 
+# --- Heist constants ---
+HEIST_COOLDOWN_SECONDS = 60 * 30   # one job per 30 minutes
+HEIST_SHOT_SECONDS = 60 * 10       # how long "getting shot" locks you out
+HEIST_BASE_PAYOUT_MIN = 3500
+HEIST_BASE_PAYOUT_MAX = 5000
+# Commands you can't use while shot. Everything not listed stays available so
+# a locked-out player can still look at their stuff - a blocklist beats an
+# allowlist here because over-blocking is the worse failure.
+SHOT_BLOCKED_COMMANDS = {"work", "daily", "coinflip", "slots", "blackjack", "heist"}
+
 # --- Quest constants ---
 # How many quests can be on your plate at once. When the daily reset lands this
 # becomes a per-day accept cap instead (player_quests.accepted_at is already

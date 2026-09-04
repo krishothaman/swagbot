@@ -6,6 +6,24 @@ from config import DB_PATH, STARTING_BALANCE
 _db: aiosqlite.Connection | None = None
 
 
+async def _ensure_columns(db: aiosqlite.Connection, table: str, columns: dict):
+    """Adds any missing columns to an existing table.
+
+    Non-destructive, unlike the quest migration - `users` holds real balances,
+    so it can never be dropped and recreated. ALTER TABLE ADD COLUMN backfills
+    existing rows with the column default.
+    """
+    async with db.execute(f"PRAGMA table_info({table})") as cursor:
+        existing = {row[1] for row in await cursor.fetchall()}
+    if not existing:
+        return  # table doesn't exist yet; CREATE TABLE will include the columns
+
+    for name, definition in columns.items():
+        if name not in existing:
+            await db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+    await db.commit()
+
+
 async def _migrate_quest_tables(db: aiosqlite.Connection):
     """One-time migration to the condition-based quest schema.
 
@@ -40,9 +58,16 @@ async def init_db():
             last_daily REAL NOT NULL DEFAULT 0,
             last_work REAL NOT NULL DEFAULT 0,
             last_message_xp REAL NOT NULL DEFAULT 0,
+            last_heist REAL NOT NULL DEFAULT 0,
+            incapacitated_until REAL NOT NULL DEFAULT 0,
             PRIMARY KEY (user_id, guild_id)
         )
     """)
+    # Existing databases predate the heist columns - add them in place.
+    await _ensure_columns(_db, "users", {
+        "last_heist": "REAL NOT NULL DEFAULT 0",
+        "incapacitated_until": "REAL NOT NULL DEFAULT 0",
+    })
     await _db.execute("""
         CREATE TABLE IF NOT EXISTS npcs (
             npc_id TEXT PRIMARY KEY,
@@ -688,6 +713,41 @@ async def set_cooldown(user_id: int, guild_id: int, field: str):
     await db.execute(
         f"UPDATE users SET {field} = ? WHERE user_id = ? AND guild_id = ?",
         (time.time(), user_id, guild_id),
+    )
+    await db.commit()
+
+
+async def set_incapacitated(user_id: int, guild_id: int, seconds: float):
+    """Locks the player out of active commands until `seconds` from now."""
+    await ensure_user(user_id, guild_id)
+    db = get_db()
+    await db.execute(
+        "UPDATE users SET incapacitated_until = ? WHERE user_id = ? AND guild_id = ?",
+        (time.time() + seconds, user_id, guild_id),
+    )
+    await db.commit()
+
+
+async def get_incapacitated_remaining(user_id: int, guild_id: int) -> float:
+    """Seconds left on the lockout, 0 if free. Read on every command, so it
+    deliberately does NOT call ensure_user - an unknown user isn't locked."""
+    db = get_db()
+    async with db.execute(
+        "SELECT incapacitated_until FROM users WHERE user_id = ? AND guild_id = ?",
+        (user_id, guild_id),
+    ) as cursor:
+        row = await cursor.fetchone()
+    if not row:
+        return 0
+    return max(0.0, row[0] - time.time())
+
+
+async def clear_incapacitated(user_id: int, guild_id: int):
+    await ensure_user(user_id, guild_id)
+    db = get_db()
+    await db.execute(
+        "UPDATE users SET incapacitated_until = 0 WHERE user_id = ? AND guild_id = ?",
+        (user_id, guild_id),
     )
     await db.commit()
 

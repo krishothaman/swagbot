@@ -2,11 +2,12 @@ import asyncio
 import logging
 
 import discord
-
+from discord import app_commands
 from discord.ext import commands
 
-from config import DISCORD_TOKEN, COMMAND_PREFIX
+from config import DISCORD_TOKEN, COMMAND_PREFIX, SHOT_BLOCKED_COMMANDS
 from database import init_db, seed_npc_data, seed_house_data, seed_quest_data
+import database as db
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("bot")
@@ -15,7 +16,42 @@ intents = discord.Intents.default()
 intents.message_content = True  # needed for leveling's on_message XP tracking
 intents.members = True          # needed to resolve users for leaderboard etc.
 
-bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents)
+def format_remaining(seconds: float) -> str:
+    minutes, secs = divmod(int(seconds), 60)
+    return f"{minutes}m {secs}s" if minutes else f"{secs}s"
+
+
+class SwagTree(app_commands.CommandTree):
+    """Gates every slash command behind the "are you shot" check.
+
+    Doing this once here is deliberate - adding a guard per command means
+    forgetting one eventually, and a punishment mechanic you can walk around
+    isn't a punishment.
+    """
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild is None or interaction.command is None:
+            return True
+
+        # Only the top-level name matters, so /house buy is covered by "house".
+        command = interaction.command
+        root = command.root_parent.name if getattr(command, "root_parent", None) else command.name
+        if root not in SHOT_BLOCKED_COMMANDS:
+            return True
+
+        remaining = await db.get_incapacitated_remaining(interaction.user.id, interaction.guild.id)
+        if remaining <= 0:
+            return True
+
+        await interaction.response.send_message(
+            f"🩸 You're bleeding out in a back room. Back on your feet in "
+            f"**{format_remaining(remaining)}**.",
+            ephemeral=True,
+        )
+        return False
+
+
+bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents, tree_cls=SwagTree)
 
 COGS = [
     "cogs.economy",
@@ -25,6 +61,7 @@ COGS = [
     "cogs.npc",
     "cogs.housing",
     "cogs.quests",
+    "cogs.heist",
     "cogs.dev"
 ]
 
