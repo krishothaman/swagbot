@@ -5,6 +5,7 @@ from discord.ext import commands
 
 import database as db
 from config import MIN_BET
+from cogs.quests import record_event
 
 SUITS = ["♠", "♥", "♦", "♣"]
 RANKS = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"]
@@ -145,6 +146,8 @@ class Blackjack(commands.Cog):
                 f"You don't have enough coins. Your balance: **{balance}**", ephemeral=True
             )
             return
+
+        await record_event(interaction.user.id, interaction.guild.id, "gamble_coins", bet)
 
         deck = new_deck()
         player_hand = [deck.pop(), deck.pop()]

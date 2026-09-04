@@ -28,6 +28,12 @@ DAILY_COOLDOWN_SECONDS = 60 * 60 * 24    # 24 hours
 # --- Blackjack / games constants ---
 MIN_BET = 10
 
+# --- Quest constants ---
+# How many quests can be on your plate at once. When the daily reset lands this
+# becomes a per-day accept cap instead (player_quests.accepted_at is already
+# being stamped for exactly that).
+MAX_ACTIVE_QUESTS = 5
+
 # --- Housing constants ---
 HOUSE_SELL_RATIO = 0.55   
 HOUSE_LEVEL_REQUIREMENTS = {

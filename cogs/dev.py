@@ -18,6 +18,7 @@ from discord.ext import commands
 
 import database as db
 from config import OWNER_ID
+from cogs.leveling import apply_level_up
 
 log = logging.getLogger("bot")
 
@@ -119,8 +120,10 @@ class Dev(commands.Cog):
     async def addxp(self, interaction: discord.Interaction, amount: int, member: discord.Member = None):
         target = self._target(interaction, member)
         xp, level = await db.add_xp(target.id, interaction.guild.id, amount)
+        new_level = await apply_level_up(target.id, interaction.guild.id, xp, level)
+        level_note = f" (leveled up to **{new_level}**!)" if new_level != level else ""
         await interaction.response.send_message(
-            f"✅ `{amount:+}` xp → {target.display_name}. Now **{xp} xp**, level **{level}**",
+            f"✅ `{amount:+}` xp → {target.display_name}. Now **{xp} xp**, level **{new_level}**{level_note}",
             ephemeral=True,
         )
 

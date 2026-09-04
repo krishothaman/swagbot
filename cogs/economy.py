@@ -6,6 +6,7 @@ from discord.ext import commands
 
 import database as db
 from config import DAILY_REWARD, DAILY_COOLDOWN_SECONDS, WORK_MIN_REWARD, WORK_MAX_REWARD, WORK_COOLDOWN_SECONDS
+from cogs.quests import record_event
 
 JOBS = [
     "delivery driver", "street musician", "dog walker", "barista",
@@ -73,6 +74,8 @@ class Economy(commands.Cog):
         job = random.choice(JOBS)
         new_balance = await db.update_balance(user_id, guild_id, earnings)
         await db.set_cooldown(user_id, guild_id, "last_work")
+        # Counted after the cooldown check, so only real shifts count.
+        await record_event(user_id, guild_id, "work_count", 1)
         await interaction.response.send_message(
             f"You worked as a **{job}** and earned **{earnings}** coins. New balance: **{new_balance}**"
         )

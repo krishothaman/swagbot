@@ -6,6 +6,26 @@ from config import DB_PATH, STARTING_BALANCE
 _db: aiosqlite.Connection | None = None
 
 
+async def _migrate_quest_tables(db: aiosqlite.Connection):
+    """One-time migration to the condition-based quest schema.
+
+    Only fires if a `quests` table exists WITHOUT the new columns - so it runs
+    once on the next boot after this change and never again. Without the
+    version check this would wipe player quest progress on every restart.
+    """
+    async with db.execute("PRAGMA table_info(quests)") as cursor:
+        columns = {row[1] for row in await cursor.fetchall()}
+
+    if not columns:
+        return  # fresh database, nothing to migrate - CREATE TABLE handles it
+    if "condition_type" in columns:
+        return  # already on the new schema
+
+    await db.execute("DROP TABLE IF EXISTS quests")
+    await db.execute("DROP TABLE IF EXISTS player_quests")
+    await db.commit()
+
+
 async def init_db():
     """Call once on bot startup. Creates tables if they don't exist."""
     global _db
@@ -49,14 +69,22 @@ async def init_db():
             PRIMARY KEY (user_id, guild_id, item_id)
         )
     """)
+    await _migrate_quest_tables(_db)
     await _db.execute("""
         CREATE TABLE IF NOT EXISTS quests (
             quest_id TEXT PRIMARY KEY,
-            npc_id TEXT NOT NULL,
+            npc_id TEXT,
+            category TEXT NOT NULL DEFAULT 'npc',
             title TEXT NOT NULL,
             description TEXT NOT NULL,
+            condition_type TEXT NOT NULL,
+            condition_target TEXT,
+            condition_amount INTEGER NOT NULL DEFAULT 1,
             reward_coins INTEGER NOT NULL DEFAULT 0,
-            reward_xp INTEGER NOT NULL DEFAULT 0
+            reward_xp INTEGER NOT NULL DEFAULT 0,
+            reward_item_id TEXT,
+            reward_item_qty INTEGER NOT NULL DEFAULT 0,
+            repeatable INTEGER NOT NULL DEFAULT 0
         )
     """)
     await _db.execute("""
@@ -65,6 +93,9 @@ async def init_db():
             guild_id INTEGER NOT NULL,
             quest_id TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'active',
+            progress INTEGER NOT NULL DEFAULT 0,
+            accepted_at REAL NOT NULL DEFAULT 0,
+            completed_at REAL,
             PRIMARY KEY (user_id, guild_id, quest_id)
         )
     """)
@@ -122,13 +153,6 @@ async def seed_npc_data():
     await db.executemany(
         "INSERT OR IGNORE INTO items (item_id, name, price, npc_id, description) VALUES (?, ?, ?, ?, ?)",
         items,
-    )
-
-    await db.execute(
-        "INSERT OR IGNORE INTO quests (quest_id, npc_id, title, description, reward_coins, reward_xp) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        ("first_errand", "shady_merchant", "Run an Errand",
-         "dont you back off now...", 200, 50),
     )
 
     await db.execute(
@@ -246,13 +270,76 @@ async def get_inventory(user_id: int, guild_id: int):
         (user_id, guild_id),
     ) as cursor:
         return await cursor.fetchall()
+async def seed_quest_data():
+    """Loads quest content from quest_data.py.
+
+    Uses INSERT OR REPLACE (unlike the other seeders) so editing quest_data.py
+    and restarting actually applies the change - that file is the source of
+    truth for quest content.
+    """
+    from quest_data import QUESTS
+
+    db = get_db()
+    await db.executemany(
+        """INSERT OR REPLACE INTO quests
+           (quest_id, npc_id, category, title, description,
+            condition_type, condition_target, condition_amount,
+            reward_coins, reward_xp, reward_item_id, reward_item_qty, repeatable)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        [
+            (
+                q["quest_id"], q["npc_id"], q["category"], q["title"], q["description"],
+                q["condition_type"], q["condition_target"], q["condition_amount"],
+                q["reward_coins"], q["reward_xp"], q["reward_item_id"],
+                q["reward_item_qty"], int(q["repeatable"]),
+            )
+            for q in QUESTS
+        ],
+    )
+
+    # Delete quests that were removed from quest_data.py, so taking a quest out
+    # of the file actually takes it out of the game. Also clears any player rows
+    # pointing at them, otherwise they'd linger as un-turn-in-able active quests
+    # taking up slots against the cap.
+    keep = [q["quest_id"] for q in QUESTS]
+    placeholders = ",".join("?" * len(keep))
+    await db.execute(f"DELETE FROM quests WHERE quest_id NOT IN ({placeholders})", keep)
+    await db.execute(
+        f"DELETE FROM player_quests WHERE quest_id NOT IN ({placeholders})", keep
+    )
+    await db.commit()
+
+
+# Quests have enough columns that positional unpacking is a bug waiting to
+# happen, so these return dicts instead of raw tuples.
+QUEST_FIELDS = (
+    "quest_id", "npc_id", "category", "title", "description",
+    "condition_type", "condition_target", "condition_amount",
+    "reward_coins", "reward_xp", "reward_item_id", "reward_item_qty", "repeatable",
+)
+_QUEST_SELECT = f"SELECT {', '.join(QUEST_FIELDS)} FROM quests"
+
+
+def _quest_dict(row):
+    return dict(zip(QUEST_FIELDS, row)) if row else None
+
+
+async def get_quest(quest_id: str):
+    db = get_db()
+    async with db.execute(f"{_QUEST_SELECT} WHERE quest_id = ?", (quest_id,)) as cursor:
+        return _quest_dict(await cursor.fetchone())
+
+
 async def get_quests_for_npc(npc_id: str):
     db = get_db()
-    async with db.execute(
-        "SELECT quest_id, title, description, reward_coins, reward_xp FROM quests WHERE npc_id = ?",
-        (npc_id,),
-    ) as cursor:
-        return await cursor.fetchall()
+    async with db.execute(f"{_QUEST_SELECT} WHERE npc_id = ?", (npc_id,)) as cursor:
+        return [_quest_dict(row) for row in await cursor.fetchall()]
+
+
+async def get_quests_by_category(category: str):
+    db = get_db()
+    async with db.execute(f"{_QUEST_SELECT} WHERE category = ?", (category,)) as cursor:
+        return [_quest_dict(row) for row in await cursor.fetchall()]
 
 
 async def get_player_quest_status(user_id: int, guild_id: int, quest_id: str):
@@ -266,13 +353,80 @@ async def get_player_quest_status(user_id: int, guild_id: int, quest_id: str):
         return row[0] if row else "available"
 
 
+async def get_player_quests(user_id: int, guild_id: int, status: str = None):
+    """Returns [(quest_id, status, progress)] - optionally filtered by status."""
+    db = get_db()
+    sql = "SELECT quest_id, status, progress FROM player_quests WHERE user_id = ? AND guild_id = ?"
+    params = [user_id, guild_id]
+    if status:
+        sql += " AND status = ?"
+        params.append(status)
+    async with db.execute(sql, params) as cursor:
+        return await cursor.fetchall()
+
+
+async def count_active_quests(user_id: int, guild_id: int) -> int:
+    db = get_db()
+    async with db.execute(
+        "SELECT COUNT(*) FROM player_quests WHERE user_id = ? AND guild_id = ? AND status = 'active'",
+        (user_id, guild_id),
+    ) as cursor:
+        row = await cursor.fetchone()
+        return row[0] if row else 0
+
+
 async def set_player_quest_status(user_id: int, guild_id: int, quest_id: str, status: str):
+    """Stamps accepted_at on accept and completed_at on completion, so a real
+    daily reset can be layered on later without another migration."""
+    now = time.time()
+    accepted_at = now if status == "active" else 0
+    completed_at = now if status == "completed" else None
+
     db = get_db()
     await db.execute(
-        """INSERT INTO player_quests (user_id, guild_id, quest_id, status)
-           VALUES (?, ?, ?, ?)
-           ON CONFLICT(user_id, guild_id, quest_id) DO UPDATE SET status = excluded.status""",
-        (user_id, guild_id, quest_id, status),
+        """INSERT INTO player_quests (user_id, guild_id, quest_id, status, progress, accepted_at, completed_at)
+           VALUES (?, ?, ?, ?, 0, ?, ?)
+           ON CONFLICT(user_id, guild_id, quest_id) DO UPDATE SET
+               status = excluded.status,
+               completed_at = excluded.completed_at,
+               -- accepting resets the counter so a re-run starts from zero
+               progress = CASE WHEN excluded.status = 'active' THEN 0 ELSE player_quests.progress END""",
+        (user_id, guild_id, quest_id, status, accepted_at, completed_at),
+    )
+    await db.commit()
+
+
+async def get_quest_progress(user_id: int, guild_id: int, quest_id: str) -> int:
+    """Stored counter for quests that can't be derived from current state
+    (e.g. "gamble 100 coins" - nothing in the DB remembers that otherwise)."""
+    db = get_db()
+    async with db.execute(
+        "SELECT progress FROM player_quests WHERE user_id = ? AND guild_id = ? AND quest_id = ?",
+        (user_id, guild_id, quest_id),
+    ) as cursor:
+        row = await cursor.fetchone()
+        return row[0] if row else 0
+
+
+async def add_quest_progress(user_id: int, guild_id: int, condition_type: str, amount: int):
+    """Bumps progress on every ACTIVE quest using this condition type.
+    One statement, so adding a gambling quest costs nothing at runtime."""
+    db = get_db()
+    await db.execute(
+        """UPDATE player_quests SET progress = progress + ?
+           WHERE user_id = ? AND guild_id = ? AND status = 'active'
+             AND quest_id IN (SELECT quest_id FROM quests WHERE condition_type = ?)""",
+        (amount, user_id, guild_id, condition_type),
+    )
+    await db.commit()
+
+
+async def clear_player_quest(user_id: int, guild_id: int, quest_id: str):
+    """Removes the row entirely so a repeatable quest becomes available again."""
+    db = get_db()
+    await db.execute(
+        "DELETE FROM player_quests WHERE user_id = ? AND guild_id = ? AND quest_id = ?",
+        (user_id, guild_id, quest_id),
     )
     await db.commit()
 

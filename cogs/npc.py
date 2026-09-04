@@ -9,6 +9,7 @@ from discord.ext import commands
 import database as db
 from ui import build_items_embed
 from cogs.housing import LandlordView, landlord_embed, LANDLORD_ID
+from cogs.quests import accept_quest, turn_in_quest, describe_rewards, describe_progress
 
 
 class BuyView(discord.ui.View):
@@ -81,13 +82,14 @@ class SellView(discord.ui.View):
         await db.update_balance(self.user_id, self.guild_id, sell_price)
         await interaction.response.send_message(f"You sold {name} for {sell_price} coins", ephemeral=True)
 class QuestView(discord.ui.View):
-    def __init__(self, user_id: int, guild_id: int, quest_id: str, status: str, reward_coins: int, reward_xp: int):
+    """Accept/turn-in buttons for one NPC quest. All the actual rules live in
+    cogs/quests.py so the NPC dialogue and /quests can't drift apart."""
+
+    def __init__(self, user_id: int, guild_id: int, quest_id: str, status: str):
         super().__init__(timeout=60)
         self.user_id = user_id
         self.guild_id = guild_id
         self.quest_id = quest_id
-        self.reward_coins = reward_coins
-        self.reward_xp = reward_xp
 
         if status == "available":
             self.add_item(self.AcceptButton(self))
@@ -103,12 +105,10 @@ class QuestView(discord.ui.View):
             if interaction.user.id != self.parent_view.user_id:
                 await interaction.response.send_message("Not your quest, selfish f**k", ephemeral=True)
                 return
-            await db.set_player_quest_status(
-                self.parent_view.user_id, self.parent_view.guild_id, self.parent_view.quest_id, "active"
+            message = await accept_quest(
+                self.parent_view.user_id, self.parent_view.guild_id, self.parent_view.quest_id
             )
-            await interaction.response.edit_message(
-                content="you got it.", embed=None, view=None
-            )
+            await interaction.response.edit_message(content=message, embed=None, view=None)
 
     class CompleteButton(discord.ui.Button):
         def __init__(self, parent_view):
@@ -119,18 +119,12 @@ class QuestView(discord.ui.View):
             if interaction.user.id != self.parent_view.user_id:
                 await interaction.response.send_message("Not your quest gng.", ephemeral=True)
                 return
-            await db.set_player_quest_status(
-                self.parent_view.user_id, self.parent_view.guild_id, self.parent_view.quest_id, "completed"
+            message = await turn_in_quest(
+                self.parent_view.user_id, self.parent_view.guild_id, self.parent_view.quest_id
             )
-            await db.update_balance(self.parent_view.user_id, self.parent_view.guild_id, self.parent_view.reward_coins)
-            await db.add_xp(self.parent_view.user_id, self.parent_view.guild_id, self.parent_view.reward_xp)
-            await interaction.response.edit_message(
-                content=f"ayy you actually did it, gng. +{self.parent_view.reward_coins} coins, +{self.parent_view.reward_xp} xp",
-                embed=None,
-                view=None,
-            )
-        
-            
+            await interaction.response.edit_message(content=message, embed=None, view=None)
+
+
 
 
 class NPCActionView(discord.ui.View):
@@ -180,17 +174,27 @@ class NPCActionView(discord.ui.View):
             await interaction.response.send_message("No quests here right now.", ephemeral=True)
             return
 
-        for quest_id, title, description, reward_coins, reward_xp in quests:
-            status = await db.get_player_quest_status(self.user_id, self.guild_id, quest_id)
-            if status != "completed":
-                view = QuestView(self.user_id, self.guild_id, quest_id, status, reward_coins, reward_xp)
-                embed = discord.Embed(title=title, description=description, color=discord.Color.blue())
-                embed.add_field(name="Reward", value=f"{reward_coins} coins, {reward_xp} xp")
-            embed.add_field(name="Status", value=status.capitalize())
+        for quest in quests:
+            status = await db.get_player_quest_status(self.user_id, self.guild_id, quest["quest_id"])
+            if status == "completed" and not quest["repeatable"]:
+                continue
+
+            embed = discord.Embed(
+                title=quest["title"], description=quest["description"], color=discord.Color.blue()
+            )
+            embed.add_field(name="Reward", value=describe_rewards(quest), inline=True)
+            embed.add_field(
+                name="Progress",
+                value=await describe_progress(self.user_id, self.guild_id, quest),
+                inline=True,
+            )
+            view = QuestView(self.user_id, self.guild_id, quest["quest_id"], status)
             await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
             return
 
-        await interaction.response.send_message("you have done everything for now. return back later", ephemeral=True)
+        await interaction.response.send_message(
+            "you have done everything for now. return back later", ephemeral=True
+        )
 
 
 class InventoryView(discord.ui.View):

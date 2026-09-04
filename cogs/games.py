@@ -5,6 +5,7 @@ from discord.ext import commands
 
 import database as db
 from config import MIN_BET
+from cogs.quests import record_event
 
 SLOT_SYMBOLS = ["🍒", "🍋", "🍇", "🍉", "⭐", "💎"]
 
@@ -31,6 +32,8 @@ class Games(commands.Cog):
             )
             return
 
+        await record_event(interaction.user.id, interaction.guild.id, "gamble_coins", bet)
+
         result = random.choice(["heads", "tails"])
         won = result == choice.value
         payout = bet if won else -bet
@@ -54,6 +57,8 @@ class Games(commands.Cog):
                 f"You don't have enough coins. Your balance: **{balance}**", ephemeral=True
             )
             return
+
+        await record_event(interaction.user.id, interaction.guild.id, "gamble_coins", bet)
 
         spin = [random.choice(SLOT_SYMBOLS) for _ in range(3)]
         display = " | ".join(spin)
