@@ -92,8 +92,14 @@ NPC_CREW = {
 MAX_NPC_CREW = 3
 
 # Odds never hit certainty in either direction - a heist is always a gamble.
+#
+# MAX_SUCCESS must leave room above ROUGH_BAND or "blown" becomes unreachable:
+# a stage is blown when roll > chance + ROUGH_BAND, so with chance 90 and a
+# band of 15 the threshold lands at 105 and a d100 can never beat it. That bug
+# made a full-crew stealth run win 100% of the time. Keep
+# MAX_SUCCESS + ROUGH_BAND comfortably under 100.
 MIN_SUCCESS = 5
-MAX_SUCCESS = 90
+MAX_SUCCESS = 80
 
 # Each extra *human* on the crew. Small, because humans also split the pot.
 PLAYER_BONUS = 6
@@ -157,6 +163,111 @@ def split_between_players(amount: int, player_count: int) -> int:
     if player_count <= 0:
         return 0
     return amount // player_count
+
+
+# --- Stages -------------------------------------------------------------
+# A job runs three stages. Each one asks for a call under a clock, rolls, and
+# either goes clean, goes rough (penalty, keep going) or gets blown (job over).
+#
+# choices: success is added to the running chance, loot multiplies the take.
+# The shape is always "safer but poorer" vs "riskier but richer" so there's a
+# genuine decision instead of an obvious best answer.
+
+STAGE_CLEAN = "clean"
+STAGE_ROUGH = "rough"
+STAGE_BLOWN = "blown"
+
+ROUGH_BAND = 15          # missing by this much or less = rough, not blown
+CATASTROPHIC_MARGIN = 40  # missing by this much is bad news at ANY stage
+
+# What a timeout costs you. Freezing up is always the worst option - it should
+# never be the smart play to just let the clock run.
+HESITATE = "hesitate"
+HESITATE_CHOICE = {
+    "label": "Froze up",
+    "success": -20,
+    "loot": 0.9,
+    "flavour": "You stood there too long.",
+}
+
+STAGES = [
+    {
+        "key": "entry",
+        "name": "Getting In",
+        "prompt": "You're at the doors. How do you want to do this?",
+        "choices": {
+            "quiet": {"label": "Slip through the side", "success": 5, "loot": 1.0,
+                      "flavour": "Side door. Nobody looks up."},
+            "loud": {"label": "Kick the front door", "success": -10, "loot": 1.15,
+                     "flavour": "The front door folds inward."},
+        },
+    },
+    {
+        "key": "vault",
+        "name": "Cracking the Vault",
+        "prompt": "The vault's in front of you. Clock's running.",
+        "choices": {
+            "careful": {"label": "Take your time", "success": 8, "loot": 0.9,
+                        "flavour": "Slow hands. Steady tumblers."},
+            "fast": {"label": "Drill it", "success": -12, "loot": 1.3,
+                     "flavour": "Metal screams. It opens."},
+        },
+    },
+    {
+        "key": "escape",
+        "name": "Getting Out",
+        "prompt": "Sirens. Decide what's coming with you.",
+        "choices": {
+            "light": {"label": "Ditch some of it", "success": 12, "loot": 0.75,
+                      "flavour": "Bags lighter, legs faster."},
+            "heavy": {"label": "Take everything", "success": -15, "loot": 1.25,
+                      "flavour": "Every bag. No arguments."},
+        },
+    },
+]
+
+
+def get_stage(index: int) -> dict:
+    return STAGES[index]
+
+
+def stage_choice(index: int, choice_key: str) -> dict:
+    if choice_key == HESITATE:
+        return HESITATE_CHOICE
+    return STAGES[index]["choices"][choice_key]
+
+
+def resolve_stage(chance: int, rng=random):
+    """Rolls one stage. Returns (result, roll)."""
+    chance = max(MIN_SUCCESS, min(MAX_SUCCESS, chance))
+    roll = rng.randint(1, 100)
+    if roll <= chance:
+        return STAGE_CLEAN, roll
+    if roll <= chance + ROUGH_BAND:
+        return STAGE_ROUGH, roll
+    return STAGE_BLOWN, roll
+
+
+def blown_severity(stage_index: int, roll: int, chance: int) -> str:
+    """How badly a blown stage hurts.
+
+    Getting caught on the way OUT is the worst case - you were holding
+    everything. A catastrophic miss is bad news at any stage, which is what
+    keeps Force genuinely dangerous the whole way through.
+    """
+    if stage_index == len(STAGES) - 1:
+        return BAD_FAILURE
+    if roll - chance > CATASTROPHIC_MARGIN:
+        return BAD_FAILURE
+    return MINOR_FAILURE
+
+
+# Getting blown at a later stage means you were holding more when it went bad.
+BLOWN_STAGE_TAKE = {0: 0.0, 1: 0.15, 2: 0.35}
+
+
+def blown_take(stage_index: int, full_take: int) -> int:
+    return int(full_take * BLOWN_STAGE_TAKE.get(stage_index, 0.0))
 
 
 def describe_odds(approach_key: str, npc_ids: list, player_count: int = 1) -> str:
