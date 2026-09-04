@@ -186,3 +186,4 @@ QUESTS = [
         "repeatable": True,
     },
 ]
+
