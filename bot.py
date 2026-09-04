@@ -6,7 +6,7 @@ import discord
 from discord.ext import commands
 
 from config import DISCORD_TOKEN, COMMAND_PREFIX
-from database import init_db, seed_npc_data
+from database import init_db, seed_npc_data, seed_house_data
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("bot")
@@ -22,7 +22,9 @@ COGS = [
     "cogs.blackjack",
     "cogs.games",
     "cogs.leveling",
-    "cogs.npc"
+    "cogs.npc",
+    "cogs.housing",
+    "cogs.dev"
 ]
 
 
@@ -48,6 +50,7 @@ async def load_cogs():
 async def main():
     await init_db()
     await seed_npc_data()
+    await seed_house_data()
     await load_cogs()
     async with bot:
         await bot.start(DISCORD_TOKEN)

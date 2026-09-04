@@ -1,3 +1,5 @@
+import random
+
 from config import SELL_PRICE_RATIO
 from discord import integrations
 import discord
@@ -5,6 +7,8 @@ from discord import app_commands
 from discord.ext import commands
 
 import database as db
+from ui import build_items_embed
+from cogs.housing import LandlordView, landlord_embed, LANDLORD_ID
 
 
 class BuyView(discord.ui.View):
@@ -189,13 +193,60 @@ class NPCActionView(discord.ui.View):
         await interaction.response.send_message("you have done everything for now. return back later", ephemeral=True)
 
 
+class InventoryView(discord.ui.View):
+    """Toggles /inventory between what you're carrying and what's in your house.
+    Both tabs go through build_items_embed, just pointed at a different table."""
+
+    def __init__(self, user_id: int, guild_id: int):
+        super().__init__(timeout=60)
+        self.user_id = user_id
+        self.guild_id = guild_id
+
+    async def _guard(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("not your stuff.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Carrying", style=discord.ButtonStyle.primary)
+    async def carrying(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._guard(interaction):
+            return
+        items = await db.get_inventory(self.user_id, self.guild_id)
+        embed = build_items_embed("Inventory", items, "You got nothin on u rn.")
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="House", style=discord.ButtonStyle.secondary)
+    async def house(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._guard(interaction):
+            return
+
+        house = await db.get_player_house(self.user_id, self.guild_id)
+        if not house:
+            await interaction.response.send_message(
+                "You don't own a place yet. Go talk to the landlord.", ephemeral=True
+            )
+            return
+
+        rows = await db.get_house_storage(self.user_id, self.guild_id)
+        used = await db.get_house_storage_used(self.user_id, self.guild_id)
+        embed = build_items_embed(
+            f"{house[1]} — Storage",
+            rows,
+            "Empty. Previous tenant left it that way.",
+            footer=f"{used}/{house[4]} slots used",
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+
+
 class NPC(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
     @app_commands.command(name="talk", description="Talk to an NPC")
     @app_commands.choices(npc=[
-        app_commands.Choice(name="Weird looking merchant", value="weird_merchant"),
+        app_commands.Choice(name="Weird looking merchant", value="shady_merchant"),
+        app_commands.Choice(name="Landlord", value=LANDLORD_ID),
     ])
     async def talk(self, interaction: discord.Interaction, npc: app_commands.Choice[str]):
         npc_data = await db.get_npc(npc.value)
@@ -205,20 +256,28 @@ class NPC(commands.Cog):
 
         npc_id, name, role, greeting = npc_data
 
+        # The landlord runs his own dialogue - what he says depends on what you own.
+        if npc_id == LANDLORD_ID:
+            embed = await landlord_embed(interaction.user.id, interaction.guild.id)
+            view = LandlordView(interaction.user.id, interaction.guild.id)
+            await interaction.response.send_message(embed=embed, view=view)
+            return
+
+        flavor = await db.get_npc_flavor_lines(npc_id)
+        if flavor:
+            greeting = f"{greeting}\n\n*{random.choice(flavor)}*"
+
         embed = discord.Embed(title=name, description=greeting, color=discord.Color.dark_gold())
         embed.set_footer(text=role.capitalize())
         view = NPCActionView(interaction.user.id, interaction.guild.id, npc_id)
         await interaction.response.send_message(embed=embed, view=view)
+
     @app_commands.command(name="inventory", description="Check your items")
     async def inventory(self, interaction: discord.Interaction):
         items = await db.get_inventory(interaction.user.id, interaction.guild.id)
-        if not items:
-            await interaction.response.send_message("You got nothin on u rn.")
-            return
-
-        lines = [f"**{name}** x{qty}" for item_id, name, qty in items]
-        embed = discord.Embed(title="Inventory", description="\n".join(lines), color=discord.Color.teal())
-        await interaction.response.send_message(embed=embed)
+        embed = build_items_embed("Inventory", items, "You got nothin on u rn.")
+        view = InventoryView(interaction.user.id, interaction.guild.id)
+        await interaction.response.send_message(embed=embed, view=view)
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(NPC(bot))
