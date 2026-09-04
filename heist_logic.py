@@ -129,15 +129,50 @@ def roll_outcome(success_chance: int, rng=random):
     return BAD_FAILURE, roll
 
 
+# How much bigger the score gets per extra human on the job.
+#
+# Close to linear on purpose. It looks generous but isn't: everyone burns their
+# own 30-minute cooldown either way, so four people running one job together
+# must not out-earn the same four running solo jobs - and at 0.85 it comes in
+# slightly under. Drop this much below linear and grouping up pays worse per
+# head than soloing, which kills the whole multiplayer feature.
+PLAYER_TAKE_SCALING = 0.85
+
+
 def calculate_take(approach_key: str, base_min: int, base_max: int,
                    player_count: int = 1, rng=random) -> int:
     """The gross score before anyone takes a cut."""
     base = rng.randint(base_min, base_max)
     take = base * APPROACHES[approach_key]["payout"]
-    # A bigger crew hits a bigger target, but sub-linearly - otherwise stacking
-    # bodies would be strictly correct and there'd be no decision to make.
-    take *= 1 + 0.25 * max(0, player_count - 1)
+    take *= 1 + PLAYER_TAKE_SCALING * max(0, player_count - 1)
     return int(take)
+
+
+def tally_votes(votes: dict, choice_keys: list) -> str:
+    """Majority wins. Ties break toward the FIRST option, which is always the
+    safer one - a split crew shouldn't get dragged into the risky play. Nobody
+    voting means the crew froze."""
+    if not votes:
+        return HESITATE
+    counts = {key: 0 for key in choice_keys}
+    for choice in votes.values():
+        if choice in counts:
+            counts[choice] += 1
+    best = max(counts.values())
+    if best == 0:
+        return HESITATE
+    for key in choice_keys:  # iteration order = declaration order = safest first
+        if counts[key] == best:
+            return key
+    return choice_keys[0]
+
+
+def per_player_cost(buy_in: int, npc_ids: list, player_count: int) -> int:
+    """Buy-in plus an even share of the crew's fee. Splitting the hire cost is
+    what makes a big crew affordable for a big group."""
+    if player_count <= 0:
+        return buy_in
+    return buy_in + hire_cost(npc_ids) // player_count
 
 
 def minor_failure_take(full_take: int) -> int:

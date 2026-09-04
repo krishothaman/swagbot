@@ -1,13 +1,22 @@
-"""Heist - step 1: solo job with a hireable NPC crew.
+"""Heist - a multiplayer job with hired NPC crew, staged runs and voting.
 
 All the money math lives in heist_logic.py so it can be tested without Discord.
-This file only collects the player's choices and reports what happened.
+This file collects input, runs the clock, and reports what happened.
 
-Multiplayer lobby, staged runs (get in / crack the vault / escape) and betrayal
-are later steps. The logic module already takes a player_count argument so the
-crew maths won't need rewriting when the lobby lands.
+Flow: /heist opens a lobby -> people join and vote an approach -> three staged
+votes under a clock -> payout or consequences. Nobody joining is fine; it just
+runs solo, which is deliberate - on a small server a heist that needs a crowd
+is a heist that never happens.
+
+Betrayal is the next step and hooks into the escape stage.
+
+Session state is in-memory on purpose: a lobby lives about a minute and a whole
+job under five. Nothing here is worth a database table; only outcomes are
+written. If the bot restarts mid-job the lobby evaporates, which is why nobody
+is charged until the job actually starts.
 """
 
+import asyncio
 import random
 import time
 
@@ -19,118 +28,215 @@ import database as db
 import heist_logic as logic
 from config import (
     HEIST_COOLDOWN_SECONDS, HEIST_SHOT_SECONDS, HEIST_STAGE_SECONDS,
+    HEIST_LOBBY_SECONDS, HEIST_BUY_IN, HEIST_MAX_CREW,
     HEIST_BASE_PAYOUT_MIN, HEIST_BASE_PAYOUT_MAX,
 )
 from cogs.economy import format_seconds
 
+# One lobby per guild - on a small server, splitting people across two
+# simultaneous lobbies means neither one fills.
+ACTIVE_HEISTS: dict[int, "HeistSession"] = {}
+# Users currently in a job anywhere, so nobody joins two at once.
+BUSY_USERS: set[int] = set()
 
-class HeistSetupView(discord.ui.View):
-    """Pick a crew, pick an approach, watch the odds move, then commit."""
 
-    def __init__(self, user_id: int, guild_id: int):
-        super().__init__(timeout=120)
-        self.user_id = user_id
+class HeistSession:
+    def __init__(self, guild_id: int, host_id: int):
         self.guild_id = guild_id
-        self.approach = "stealth"
-        self.npc_ids = []
+        self.host_id = host_id
+        self.players = [host_id]
+        self.npc_ids: list[str] = []
+        self.approach_votes: dict[int, str] = {host_id: "stealth"}
+
+    @property
+    def approach(self) -> str:
+        winner = logic.tally_votes(self.approach_votes, list(logic.APPROACHES))
+        return "stealth" if winner == logic.HESITATE else winner
+
+    def vote_summary(self) -> str:
+        counts = {}
+        for choice in self.approach_votes.values():
+            counts[choice] = counts.get(choice, 0) + 1
+        if not counts:
+            return "no votes yet"
+        return " · ".join(
+            f"{logic.APPROACHES[k]['name']} {v}" for k, v in counts.items() if k in logic.APPROACHES
+        )
+
+    def release(self):
+        ACTIVE_HEISTS.pop(self.guild_id, None)
+        for player in self.players:
+            BUSY_USERS.discard(player)
+
+
+# --- Lobby --------------------------------------------------------------
+
+class LobbyView(discord.ui.View):
+    def __init__(self, session: HeistSession):
+        super().__init__(timeout=HEIST_LOBBY_SECONDS)
+        self.session = session
+        self.started = False
 
         crew_select = discord.ui.Select(
-            placeholder="Hire crew (optional)",
+            placeholder="Hire crew (host only)",
             min_values=0,
             max_values=logic.MAX_NPC_CREW,
             options=[
                 discord.SelectOption(
-                    label=f"{data['name']} — {data['cost']} coins",
+                    label=f"{d['name']} — {d['cost']} coins",
                     value=npc_id,
-                    description=f"+{data['bonus']}% success, takes {data['cut']}% — {data['blurb']}"[:100],
+                    description=f"+{d['bonus']}% success, takes {d['cut']}% — {d['blurb']}"[:100],
                 )
-                for npc_id, data in logic.NPC_CREW.items()
+                for npc_id, d in logic.NPC_CREW.items()
             ],
         )
         crew_select.callback = self.on_crew
         self.add_item(crew_select)
 
         approach_select = discord.ui.Select(
-            placeholder="Choose your approach",
+            placeholder="Vote the approach",
             options=[
                 discord.SelectOption(
-                    label=f"{data['name']} — {data['success']}% base",
+                    label=f"{d['name']} — {d['success']}% base",
                     value=key,
-                    description=data["blurb"][:100],
-                    default=(key == "stealth"),
+                    description=d["blurb"][:100],
                 )
-                for key, data in logic.APPROACHES.items()
+                for key, d in logic.APPROACHES.items()
             ],
         )
-        approach_select.callback = self.on_approach
+        approach_select.callback = self.on_vote
         self.add_item(approach_select)
 
-    async def _guard(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("not your job.", ephemeral=True)
-            return False
-        return True
+    def build_embed(self, guild: discord.Guild) -> discord.Embed:
+        session = self.session
+        approach = logic.APPROACHES[session.approach]
+        count = len(session.players)
+        chance = logic.calculate_success(session.approach, session.npc_ids, count)
+        cost = logic.per_player_cost(HEIST_BUY_IN, session.npc_ids, count)
 
-    def build_embed(self) -> discord.Embed:
-        approach = logic.APPROACHES[self.approach]
-        chance = logic.calculate_success(self.approach, self.npc_ids)
-        cost = logic.hire_cost(self.npc_ids)
-        _, npc_cut = logic.apply_npc_cuts(100, self.npc_ids)
+        names = []
+        for pid in session.players:
+            member = guild.get_member(pid)
+            label = member.display_name if member else f"user {pid}"
+            names.append(f"**{label}**" + (" (host)" if pid == session.host_id else ""))
 
         embed = discord.Embed(
-            title="Planning a Job",
-            description="Odds update as you pick. Nothing is charged until you go.",
+            title="Putting a crew together",
+            description=f"Doors close in **{HEIST_LOBBY_SECONDS}s**. Press Join to get in on it.",
             color=discord.Color.dark_red(),
         )
+        embed.add_field(name=f"Crew ({count}/{HEIST_MAX_CREW})", value="\n".join(names), inline=False)
         embed.add_field(name="Approach", value=f"{approach['name']}\n*{approach['blurb']}*", inline=False)
-        embed.add_field(name="Success", value=f"**{chance}%**", inline=True)
-        embed.add_field(name="Upfront", value=f"{cost} coins", inline=True)
-        embed.add_field(name="Crew takes", value=f"{npc_cut}% of the score", inline=True)
+        embed.add_field(name="Odds", value=f"**{chance}%**", inline=True)
+        embed.add_field(name="Costs you", value=f"{cost} coins", inline=True)
+        embed.add_field(name="Votes", value=session.vote_summary(), inline=True)
 
-        if approach["requires_item"]:
-            embed.add_field(
-                name="Requires", value=f"`{approach['requires_item']}` in your inventory", inline=False
-            )
-        crew = ", ".join(logic.NPC_CREW[n]["name"] for n in self.npc_ids) or "flying solo"
-        embed.set_footer(text=f"Crew: {crew}")
+        hired = ", ".join(logic.NPC_CREW[n]["name"] for n in session.npc_ids) or "none"
+        embed.set_footer(text=f"Hired: {hired} — nothing is charged until the job starts")
         return embed
 
-    async def on_crew(self, interaction: discord.Interaction):
-        if not await self._guard(interaction):
-            return
-        self.npc_ids = interaction.data["values"]
-        await interaction.response.edit_message(embed=self.build_embed(), view=self)
-
-    async def on_approach(self, interaction: discord.Interaction):
-        if not await self._guard(interaction):
-            return
-        self.approach = interaction.data["values"][0]
-        await interaction.response.edit_message(embed=self.build_embed(), view=self)
-
-    @discord.ui.button(label="Go", style=discord.ButtonStyle.danger, row=2)
-    async def go(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await self._guard(interaction):
-            return
-        self.stop()  # planning is over; the stage driver takes the message from here
-        await run_heist(interaction, self.user_id, self.guild_id, self.approach, self.npc_ids)
-
-    @discord.ui.button(label="Call it off", style=discord.ButtonStyle.secondary, row=2)
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await self._guard(interaction):
-            return
+    async def refresh(self, interaction: discord.Interaction):
         await interaction.response.edit_message(
-            content="Maybe next time.", embed=None, view=None
+            embed=self.build_embed(interaction.guild), view=self
         )
 
+    @discord.ui.button(label="Join", style=discord.ButtonStyle.success, row=2)
+    async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
+        session = self.session
+        user_id = interaction.user.id
 
-class StageView(discord.ui.View):
-    """One stage's choices under a clock. The driver awaits wait(); if that
-    returns True nobody pressed anything and the player froze."""
+        if user_id in session.players:
+            await interaction.response.send_message("You're already in.", ephemeral=True)
+            return
+        if user_id in BUSY_USERS:
+            await interaction.response.send_message("You're already on another job.", ephemeral=True)
+            return
+        if len(session.players) >= HEIST_MAX_CREW:
+            await interaction.response.send_message("Crew's full.", ephemeral=True)
+            return
 
-    def __init__(self, user_id: int, stage: dict):
+        remaining = await db.get_incapacitated_remaining(user_id, interaction.guild.id)
+        if remaining > 0:
+            await interaction.response.send_message(
+                f"You're in no shape for this. {format_seconds(remaining)} left.", ephemeral=True
+            )
+            return
+
+        last = await db.get_cooldown(user_id, interaction.guild.id, "last_heist")
+        elapsed = time.time() - last
+        if elapsed < HEIST_COOLDOWN_SECONDS:
+            await interaction.response.send_message(
+                f"You're too hot right now. {format_seconds(HEIST_COOLDOWN_SECONDS - elapsed)} left.",
+                ephemeral=True,
+            )
+            return
+
+        session.players.append(user_id)
+        BUSY_USERS.add(user_id)
+        await self.refresh(interaction)
+
+    @discord.ui.button(label="Leave", style=discord.ButtonStyle.secondary, row=2)
+    async def leave(self, interaction: discord.Interaction, button: discord.ui.Button):
+        session = self.session
+        user_id = interaction.user.id
+        if user_id == session.host_id:
+            await interaction.response.send_message(
+                "You're running this. Call it off instead.", ephemeral=True
+            )
+            return
+        if user_id not in session.players:
+            await interaction.response.send_message("You're not in this one.", ephemeral=True)
+            return
+        session.players.remove(user_id)
+        session.approach_votes.pop(user_id, None)
+        BUSY_USERS.discard(user_id)
+        await self.refresh(interaction)
+
+    @discord.ui.button(label="Go now", style=discord.ButtonStyle.danger, row=2)
+    async def start(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.session.host_id:
+            await interaction.response.send_message("Only the host calls it.", ephemeral=True)
+            return
+        self.started = True
+        await interaction.response.defer()
+        self.stop()
+
+    @discord.ui.button(label="Call it off", style=discord.ButtonStyle.secondary, row=3)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.session.host_id:
+            await interaction.response.send_message("Only the host calls it.", ephemeral=True)
+            return
+        self.started = False
+        self.cancelled = True
+        await interaction.response.edit_message(
+            content="Called off.", embed=None, view=None
+        )
+        self.stop()
+
+    async def on_crew(self, interaction: discord.Interaction):
+        if interaction.user.id != self.session.host_id:
+            await interaction.response.send_message("The host does the hiring.", ephemeral=True)
+            return
+        self.session.npc_ids = interaction.data["values"]
+        await self.refresh(interaction)
+
+    async def on_vote(self, interaction: discord.Interaction):
+        if interaction.user.id not in self.session.players:
+            await interaction.response.send_message("Join first.", ephemeral=True)
+            return
+        self.session.approach_votes[interaction.user.id] = interaction.data["values"][0]
+        await self.refresh(interaction)
+
+
+# --- Stage voting -------------------------------------------------------
+
+class StageVoteView(discord.ui.View):
+    """Everyone on the crew votes. Stops early once all of them have."""
+
+    def __init__(self, session: HeistSession, stage: dict):
         super().__init__(timeout=HEIST_STAGE_SECONDS)
-        self.user_id = user_id
-        self.choice = None
+        self.session = session
+        self.votes: dict[int, str] = {}
 
         for key, data in stage["choices"].items():
             self.add_item(self.ChoiceButton(self, key, data["label"]))
@@ -142,16 +248,18 @@ class StageView(discord.ui.View):
             self.key = key
 
         async def callback(self, interaction: discord.Interaction):
-            if interaction.user.id != self.parent_view.user_id:
-                await interaction.response.send_message("not your job.", ephemeral=True)
+            view = self.parent_view
+            if interaction.user.id not in view.session.players:
+                await interaction.response.send_message("You're not on this job.", ephemeral=True)
                 return
-            self.parent_view.choice = self.key
-            # Ack without changing anything - the driver redraws the message.
-            await interaction.response.defer()
-            self.parent_view.stop()
+            view.votes[interaction.user.id] = self.key
+            await interaction.response.send_message(f"Voted: **{self.label}**", ephemeral=True)
+            if len(view.votes) >= len(view.session.players):
+                view.stop()
 
 
-def stage_embed(stage: dict, index: int, chance: int, loot_mult: float, log: list) -> discord.Embed:
+def stage_embed(session: HeistSession, stage: dict, index: int,
+                chance: int, loot_mult: float, log: list) -> discord.Embed:
     embed = discord.Embed(
         title=f"{stage['name']}  ({index + 1}/{len(logic.STAGES)})",
         description=stage["prompt"],
@@ -159,68 +267,80 @@ def stage_embed(stage: dict, index: int, chance: int, loot_mult: float, log: lis
     )
     embed.add_field(name="Odds", value=f"**{chance}%**", inline=True)
     embed.add_field(name="Haul", value=f"×{loot_mult:.2f}", inline=True)
+    embed.add_field(name="Crew", value=str(len(session.players)), inline=True)
     if log:
-        embed.add_field(name="So far", value="\n".join(log), inline=False)
-    embed.set_footer(text=f"{HEIST_STAGE_SECONDS}s to decide — freezing up costs you")
+        embed.add_field(name="So far", value="\n".join(log[-4:]), inline=False)
+    embed.set_footer(text=f"{HEIST_STAGE_SECONDS}s to vote — majority wins, ties play it safe")
     return embed
 
 
-async def run_heist(interaction: discord.Interaction, user_id: int, guild_id: int,
-                    approach_key: str, npc_ids: list):
-    """Validates, charges, then drives the three stages. All maths in heist_logic."""
+# --- The job ------------------------------------------------------------
+
+async def run_job(message: discord.Message, guild: discord.Guild, session: HeistSession):
+    """Charges everyone, runs the stages, pays out. Caller handles cleanup."""
+    approach_key = session.approach
     approach = logic.APPROACHES[approach_key]
 
-    # Re-check the cooldown here, not just at /heist - the setup view sits open
-    # for up to two minutes and a lot can happen in that window.
-    async def refuse(title: str, body: str):
-        await interaction.response.edit_message(
-            embed=discord.Embed(title=title, description=body, color=discord.Color.greyple()),
+    # Anyone who can't cover their share at go-time is left behind rather than
+    # put into debt. Re-checked here because the lobby sat open for a minute.
+    cost = logic.per_player_cost(HEIST_BUY_IN, session.npc_ids, len(session.players))
+    paying = []
+    for pid in session.players:
+        if await db.get_balance(pid, guild.id) >= cost:
+            paying.append(pid)
+
+    if session.host_id not in paying:
+        await message.edit(
+            embed=discord.Embed(
+                title="Job's off",
+                description=f"The host can't cover their **{cost}** coin share.",
+                color=discord.Color.greyple(),
+            ),
             view=None,
         )
-
-    last = await db.get_cooldown(user_id, guild_id, "last_heist")
-    elapsed = time.time() - last
-    if elapsed < HEIST_COOLDOWN_SECONDS:
-        remaining = HEIST_COOLDOWN_SECONDS - elapsed
-        await refuse("Too soon", f"Heat's still on. Try again in **{format_seconds(remaining)}**.")
         return
+
+    dropped = [p for p in session.players if p not in paying]
+    session.players = paying
 
     if approach["requires_item"]:
-        inventory = await db.get_inventory(user_id, guild_id)
-        if not any(item_id == approach["requires_item"] for item_id, _, _ in inventory):
-            await refuse("Can't pull that off",
-                         f"**{approach['name']}** needs a `{approach['requires_item']}`.")
+        inventory = await db.get_inventory(session.host_id, guild.id)
+        if not any(i == approach["requires_item"] for i, _, _ in inventory):
+            await message.edit(
+                embed=discord.Embed(
+                    title="Can't pull that off",
+                    description=f"**{approach['name']}** needs the host to hold a "
+                                f"`{approach['requires_item']}`.",
+                    color=discord.Color.greyple(),
+                ),
+                view=None,
+            )
             return
 
-    cost = logic.hire_cost(npc_ids)
-    balance = await db.get_balance(user_id, guild_id)
-    if balance < cost:
-        await refuse("Crew wants paying",
-                     f"You need **{cost}** coins up front. You have **{balance}**.")
-        return
+    # Committed: charge everyone, stamp every cooldown.
+    for pid in session.players:
+        await db.update_balance(pid, guild.id, -cost)
+        await db.set_cooldown(pid, guild.id, "last_heist")
 
-    # Committed from here: charge, stamp the cooldown, run the job.
-    if cost:
-        await db.update_balance(user_id, guild_id, -cost)
-    await db.set_cooldown(user_id, guild_id, "last_heist")
-
-    chance = logic.calculate_success(approach_key, npc_ids)
-    gross = logic.calculate_take(approach_key, HEIST_BASE_PAYOUT_MIN, HEIST_BASE_PAYOUT_MAX)
+    count = len(session.players)
+    chance = logic.calculate_success(approach_key, session.npc_ids, count)
+    gross = logic.calculate_take(
+        approach_key, HEIST_BASE_PAYOUT_MIN, HEIST_BASE_PAYOUT_MAX, count
+    )
     loot_mult = 1.0
     log = []
-
-    await interaction.response.edit_message(
-        embed=stage_embed(logic.get_stage(0), 0, chance, loot_mult, log), view=None
-    )
-    message = await interaction.original_response()
+    if dropped:
+        log.append(f"*{len(dropped)} couldn't cover their share and stayed behind.*")
 
     for index in range(len(logic.STAGES)):
         stage = logic.get_stage(index)
-        view = StageView(user_id, stage)
-        await message.edit(embed=stage_embed(stage, index, chance, loot_mult, log), view=view)
+        view = StageVoteView(session, stage)
+        await message.edit(
+            embed=stage_embed(session, stage, index, chance, loot_mult, log), view=view
+        )
+        await view.wait()
 
-        timed_out = await view.wait()
-        choice_key = logic.HESITATE if timed_out else view.choice
+        choice_key = logic.tally_votes(view.votes, list(stage["choices"]))
         choice = logic.stage_choice(index, choice_key)
 
         stage_chance = chance + choice["success"]
@@ -230,10 +350,9 @@ async def run_heist(interaction: discord.Interaction, user_id: int, guild_id: in
             severity = logic.blown_severity(index, roll, stage_chance)
             take = logic.blown_take(index, int(gross * loot_mult * choice["loot"]))
             log.append(f"❌ **{stage['name']}** — {choice['label']}: it went wrong.")
-            await finish_blown(message, user_id, guild_id, severity, take, npc_ids, cost, log)
+            await finish_blown(message, guild, session, severity, take, cost, log)
             return
 
-        # Survived. Rough stages still cost you.
         loot_mult *= choice["loot"]
         if result == logic.STAGE_ROUGH:
             chance = max(logic.MIN_SUCCESS, stage_chance - 10)
@@ -243,29 +362,31 @@ async def run_heist(interaction: discord.Interaction, user_id: int, guild_id: in
             chance = min(logic.MAX_SUCCESS, stage_chance)
             log.append(f"✅ **{stage['name']}** — {choice['flavour']}")
 
-    # Made it through all three.
     final_take = int(gross * loot_mult)
-    after_cuts, npc_take = logic.apply_npc_cuts(final_take, npc_ids)
-    new_balance = await db.update_balance(user_id, guild_id, after_cuts)
+    after_cuts, npc_take = logic.apply_npc_cuts(final_take, session.npc_ids)
+    share = logic.split_between_players(after_cuts, len(session.players))
+
+    for pid in session.players:
+        await db.update_balance(pid, guild.id, share)
 
     embed = discord.Embed(
-        title="Clean getaway",
-        description="\n".join(log),
-        color=discord.Color.green(),
+        title="Clean getaway", description="\n".join(log), color=discord.Color.green()
     )
     embed.add_field(name="Haul", value=f"{final_take} coins", inline=True)
     embed.add_field(name="Crew cut", value=f"-{npc_take}", inline=True)
-    embed.add_field(name="Your take", value=f"**+{after_cuts}**", inline=True)
-    embed.set_footer(text=f"Balance: {new_balance}")
+    embed.add_field(name="Each", value=f"**+{share}**", inline=True)
+    embed.set_footer(text=f"Split {len(session.players)} ways, after a {cost} buy-in each")
     await message.edit(embed=embed, view=None)
 
 
-async def finish_blown(message, user_id: int, guild_id: int, severity: str,
-                       take: int, npc_ids: list, cost: int, log: list):
-    """Resolves a job that fell apart mid-run."""
+async def finish_blown(message: discord.Message, guild: discord.Guild, session: HeistSession,
+                       severity: str, take: int, cost: int, log: list):
     if severity == logic.MINOR_FAILURE:
-        after_cuts, npc_take = logic.apply_npc_cuts(take, npc_ids)
-        new_balance = await db.update_balance(user_id, guild_id, after_cuts)
+        after_cuts, npc_take = logic.apply_npc_cuts(take, session.npc_ids)
+        share = logic.split_between_players(after_cuts, len(session.players))
+        for pid in session.players:
+            await db.update_balance(pid, guild.id, share)
+
         embed = discord.Embed(
             title="Blown — but you're breathing",
             description="\n".join(log),
@@ -273,32 +394,32 @@ async def finish_blown(message, user_id: int, guild_id: int, severity: str,
         )
         embed.add_field(name="Got away with", value=f"{take} coins", inline=True)
         embed.add_field(name="Crew cut", value=f"-{npc_take}", inline=True)
-        embed.add_field(name="Your take", value=f"**+{after_cuts}**", inline=True)
-        embed.set_footer(text=f"Balance: {new_balance}")
+        embed.add_field(name="Each", value=f"**+{share}**", inline=True)
+        embed.set_footer(text=f"Buy-in was {cost} each")
         await message.edit(embed=embed, view=None)
         return
 
-    # Bad failure: shot, and you drop something on the way down.
-    await db.set_incapacitated(user_id, guild_id, HEIST_SHOT_SECONDS)
-
-    lost_line = "Nothing on you worth taking."
-    inventory = await db.get_inventory(user_id, guild_id)
-    if inventory:
-        item_id, name, _ = random.choice(inventory)
-        if await db.remove_item_from_inventory(user_id, guild_id, item_id, 1):
-            lost_line = f"You dropped **{name}**."
+    # Bad failure: the whole crew goes down.
+    losses = []
+    for pid in session.players:
+        await db.set_incapacitated(pid, guild.id, HEIST_SHOT_SECONDS)
+        inventory = await db.get_inventory(pid, guild.id)
+        if inventory:
+            item_id, name, _ = random.choice(inventory)
+            if await db.remove_item_from_inventory(pid, guild.id, item_id, 1):
+                member = guild.get_member(pid)
+                who = member.display_name if member else str(pid)
+                losses.append(f"{who} dropped **{name}**")
 
     embed = discord.Embed(
         title="It went bad",
-        description="\n".join(log) + "\n\nYou got shot on the way out.",
+        description="\n".join(log) + "\n\nShots fired. Everyone's down.",
         color=discord.Color.dark_red(),
     )
     embed.add_field(name="Take", value="Nothing.", inline=True)
-    embed.add_field(name="Lost", value=lost_line, inline=True)
+    embed.add_field(name="Lost", value="\n".join(losses) or "Nothing worth taking.", inline=True)
     embed.add_field(name="Out of action",
-                    value=f"**{format_seconds(HEIST_SHOT_SECONDS)}**", inline=False)
-    if cost:
-        embed.set_footer(text=f"The crew kept their {cost} coins.")
+                    value=f"**{format_seconds(HEIST_SHOT_SECONDS)}** each", inline=False)
     await message.edit(embed=embed, view=None)
 
 
@@ -306,20 +427,58 @@ class Heist(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @app_commands.command(name="heist", description="Plan and pull off a heist")
+    @app_commands.command(name="heist", description="Put a crew together and rob the place")
     async def heist(self, interaction: discord.Interaction):
-        last = await db.get_cooldown(interaction.user.id, interaction.guild.id, "last_heist")
+        guild_id = interaction.guild.id
+        user_id = interaction.user.id
+
+        if guild_id in ACTIVE_HEISTS:
+            await interaction.response.send_message(
+                "There's already a job being put together. Go join it.", ephemeral=True
+            )
+            return
+        if user_id in BUSY_USERS:
+            await interaction.response.send_message("You're already on a job.", ephemeral=True)
+            return
+
+        last = await db.get_cooldown(user_id, guild_id, "last_heist")
         elapsed = time.time() - last
         if elapsed < HEIST_COOLDOWN_SECONDS:
-            remaining = HEIST_COOLDOWN_SECONDS - elapsed
             await interaction.response.send_message(
-                f"Cop's still on you. Next job in **{format_seconds(remaining)}**.",
+                f"Heat's still on. Next job in **{format_seconds(HEIST_COOLDOWN_SECONDS - elapsed)}**.",
                 ephemeral=True,
             )
             return
 
-        view = HeistSetupView(interaction.user.id, interaction.guild.id)
-        await interaction.response.send_message(embed=view.build_embed(), view=view)
+        session = HeistSession(guild_id, user_id)
+        ACTIVE_HEISTS[guild_id] = session
+        BUSY_USERS.add(user_id)
+
+        # try/finally is load-bearing: if anything in here raises, these players
+        # would otherwise stay "busy" forever and could never heist again.
+        try:
+            view = LobbyView(session)
+            await interaction.response.send_message(
+                embed=view.build_embed(interaction.guild), view=view
+            )
+            message = await interaction.original_response()
+
+            await view.wait()
+            if getattr(view, "cancelled", False):
+                return
+
+            await run_job(message, interaction.guild, session)
+        except Exception:
+            try:
+                await interaction.followup.send(
+                    "Something went wrong and the job fell apart. Nobody's on cooldown for it.",
+                    ephemeral=True,
+                )
+            except discord.HTTPException:
+                pass
+            raise
+        finally:
+            session.release()
 
 
 async def setup(bot: commands.Bot):

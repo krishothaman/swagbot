@@ -33,7 +33,11 @@ HEIST_COOLDOWN_SECONDS = 60 * 30   # one job per 30 minutes
 HEIST_SHOT_SECONDS = 60 * 10       # how long "getting shot" locks you out
 HEIST_BASE_PAYOUT_MIN = 3500
 HEIST_BASE_PAYOUT_MAX = 5000
-HEIST_STAGE_SECONDS = 25   # how long you get to make each call before you freeze
+HEIST_STAGE_SECONDS = 25   # how long the crew gets to vote on each call
+HEIST_LOBBY_SECONDS = 60   # how long the doors stay open for people to join
+HEIST_BUY_IN = 400         # what each member puts in. Also the anti-alt-farming
+                           # measure: joining has to cost something real.
+HEIST_MAX_CREW = 6         # humans, not counting hired NPCs
 # Commands you can't use while shot. Everything not listed stays available so
 # a locked-out player can still look at their stuff - a blocklist beats an
 # allowlist here because over-blocking is the worse failure.
