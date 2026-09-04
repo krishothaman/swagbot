@@ -1,12 +1,13 @@
 """Owner-only debug tools.
 
-Access is locked down in three independent layers:
-  1. is_owner() below - the hard check, fails closed on every path.
-  2. @app_commands.default_permissions() - hides /dev from non-admins in the UI.
-  3. Every response is ephemeral, so nothing leaks into the channel.
+Access is locked down by is_owner() below - the hard check, fails closed on
+every path. Every response is also ephemeral, so nothing leaks into the
+channel even for the one person who can see it.
 
-Only layer 1 actually enforces anything. The other two are there so nobody is
-ever tempted to try.
+Deliberately NOT gated by default_permissions(administrator=True): that gates
+on the *server member's* permissions, not the bot owner's, so an owner without
+Administrator on a given server would be locked out of their own tools. The
+is_owner() check is the actual authority here regardless of server role.
 """
 
 import logging
@@ -48,7 +49,6 @@ class Dev(commands.Cog):
         name="dev",
         description="Owner-only debug tools",
         guild_only=True,
-        default_permissions=discord.Permissions(administrator=True),
     )
 
     async def cog_app_command_error(self, interaction: discord.Interaction, error):
