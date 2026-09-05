@@ -198,6 +198,12 @@ async def seed_npc_data():
          "HEY. Hey hey hey. Look at this face."),
     )
 
+    await db.execute(
+        "INSERT OR IGNORE INTO npcs (npc_id, name, role, greeting_text) VALUES (?, ?, ?, ?)",
+        ("casino_owner", "The Casino Owner", "house",
+         "There he is. I had a feeling about tonight."),
+    )
+
     # Flavor lines get picked at random when you talk to an NPC. The merchant's
     # fifth-floor line is deliberately in here and not scripted anywhere.
     flavor = [
@@ -209,6 +215,11 @@ async def seed_npc_data():
         ("gun_man", "You hear that? No? GOOD. That means it worked."),
         ("gun_man", "I've been shot four times. Ask me where. ASK ME."),
         ("gun_man", "Tight. Everything's tight. That's a good thing, that's a GOOD thing."),
+        ("casino_owner", "I don't need you to lose. I need you to keep playing. Those are different, and only one of them is my business."),
+        ("casino_owner", "Everybody who works here is very nice to you. That's not a coincidence, it's a line item."),
+        ("casino_owner", "The odds are on the wall. Nobody reads the wall. I keep putting it up."),
+        ("casino_owner", "There's no clock in here. People notice that eventually. Usually later than they'd like."),
+        ("casino_owner", "I've never once had to ask a man to sit down. Not once, in all these years."),
     ]
     await db.executemany(
         "INSERT OR IGNORE INTO npc_flavor (npc_id, line) VALUES (?, ?)", flavor

@@ -185,5 +185,59 @@ QUESTS = [
         "reward_item_qty": 0,
         "repeatable": True,
     },
+
+    # --- The Casino Owner -------------------------------------------------
+    # He pays you to keep playing, which is the joke and also the mechanic.
+    # Every one of these is measured in coins STAKED, not coins won - the
+    # house doesn't care whether you win, and rewarding wins would hand the
+    # player a second payout on top of a payout.
+    {
+        "quest_id": "casino_regular",
+        "npc_id": "casino_owner",
+        "category": "npc",
+        "title": "Comped",
+        "description": "Put 2,000 through the tables. Any table, any way you like. "
+                       "The drinks are on the house either way.",
+        "condition_type": "gamble_coins",
+        "condition_target": None,
+        "condition_amount": 2000,
+        "reward_coins": 400,
+        "reward_xp": 80,
+        "reward_item_id": None,
+        "reward_item_qty": 0,
+        "repeatable": True,
+    },
+    {
+        "quest_id": "high_roller",
+        "npc_id": "casino_owner",
+        "category": "npc",
+        "title": "High Roller",
+        "description": "Twenty-five thousand across the floor. I'm not asking you to win it. "
+                       "I'm asking you to move it.",
+        "condition_type": "gamble_coins",
+        "condition_target": None,
+        "condition_amount": 25000,
+        "reward_coins": 5000,
+        "reward_xp": 400,
+        "reward_item_id": "lucky_coin",
+        "reward_item_qty": 1,
+        "repeatable": False,
+    },
+    {
+        "quest_id": "walked_out_ahead",
+        "npc_id": "casino_owner",
+        "category": "npc",
+        "title": "Walked Out Ahead",
+        "description": "Be holding 100,000 at the same time as standing in my building. "
+                       "Almost nobody manages both. I'd like to shake your hand.",
+        "condition_type": "have_coins",
+        "condition_target": None,
+        "condition_amount": 100000,
+        "reward_coins": 2500,
+        "reward_xp": 300,
+        "reward_item_id": None,
+        "reward_item_qty": 0,
+        "repeatable": False,
+    },
 ]
 

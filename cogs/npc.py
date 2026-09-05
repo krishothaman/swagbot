@@ -10,6 +10,7 @@ import database as db
 from ui import build_items_embed
 from cogs.housing import LandlordView, landlord_embed, LANDLORD_ID
 from cogs.gunman import gunman_intro, GUNMAN_ID
+from cogs.casino import casino_intro, CASINO_ID
 from cogs.quests import accept_quest, turn_in_quest, describe_rewards, describe_progress
 
 
@@ -128,6 +129,42 @@ class QuestView(discord.ui.View):
 
 
 
+async def show_npc_quests(interaction: discord.Interaction, user_id: int,
+                          guild_id: int, npc_id: str):
+    """Offers the first quest this NPC has that the player can still act on.
+
+    Pulled out of NPCActionView so NPCs with their own bespoke view - the
+    casino owner, and anyone added later - browse quests exactly the same way
+    rather than each growing a slightly different copy of this loop.
+    """
+    quests = await db.get_quests_for_npc(npc_id)
+    if not quests:
+        await interaction.response.send_message("No quests here right now.", ephemeral=True)
+        return
+
+    for quest in quests:
+        status = await db.get_player_quest_status(user_id, guild_id, quest["quest_id"])
+        if status == "completed" and not quest["repeatable"]:
+            continue
+
+        embed = discord.Embed(
+            title=quest["title"], description=quest["description"], color=discord.Color.blue()
+        )
+        embed.add_field(name="Reward", value=describe_rewards(quest), inline=True)
+        embed.add_field(
+            name="Progress",
+            value=await describe_progress(user_id, guild_id, quest),
+            inline=True,
+        )
+        view = QuestView(user_id, guild_id, quest["quest_id"], status)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        return
+
+    await interaction.response.send_message(
+        "you have done everything for now. return back later", ephemeral=True
+    )
+
+
 class NPCActionView(discord.ui.View):
     def __init__(self, user_id: int, guild_id: int, npc_id: str):
         super().__init__(timeout=60)
@@ -169,33 +206,7 @@ class NPCActionView(discord.ui.View):
     async def quests_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await self._guard(interaction):
             return
-
-        quests = await db.get_quests_for_npc(self.npc_id)
-        if not quests:
-            await interaction.response.send_message("No quests here right now.", ephemeral=True)
-            return
-
-        for quest in quests:
-            status = await db.get_player_quest_status(self.user_id, self.guild_id, quest["quest_id"])
-            if status == "completed" and not quest["repeatable"]:
-                continue
-
-            embed = discord.Embed(
-                title=quest["title"], description=quest["description"], color=discord.Color.blue()
-            )
-            embed.add_field(name="Reward", value=describe_rewards(quest), inline=True)
-            embed.add_field(
-                name="Progress",
-                value=await describe_progress(self.user_id, self.guild_id, quest),
-                inline=True,
-            )
-            view = QuestView(self.user_id, self.guild_id, quest["quest_id"], status)
-            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-            return
-
-        await interaction.response.send_message(
-            "you have done everything for now. return back later", ephemeral=True
-        )
+        await show_npc_quests(interaction, self.user_id, self.guild_id, self.npc_id)
 
 
 class InventoryView(discord.ui.View):
@@ -253,6 +264,7 @@ class NPC(commands.Cog):
         app_commands.Choice(name="Weird looking merchant", value="shady_merchant"),
         app_commands.Choice(name="Landlord", value=LANDLORD_ID),
         app_commands.Choice(name="The Gun Man", value=GUNMAN_ID),
+        app_commands.Choice(name="The Casino Owner", value=CASINO_ID),
     ])
     async def talk(self, interaction: discord.Interaction, npc: app_commands.Choice[str]):
         npc_data = await db.get_npc(npc.value)
@@ -266,6 +278,13 @@ class NPC(commands.Cog):
         if npc_id == LANDLORD_ID:
             embed = await landlord_embed(interaction.user.id, interaction.guild.id)
             view = LandlordView(interaction.user.id, interaction.guild.id)
+            await interaction.response.send_message(embed=embed, view=view)
+            return
+
+        # The house runs its own tables - a button can't invoke /slots, so his
+        # view plays the games itself through casino_logic.
+        if npc_id == CASINO_ID:
+            embed, view = await casino_intro(interaction.user.id, interaction.guild.id)
             await interaction.response.send_message(embed=embed, view=view)
             return
 
