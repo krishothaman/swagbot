@@ -29,6 +29,7 @@ from discord.ext import commands
 
 import database as db
 import heist_logic as logic
+import house_perks as perks
 from config import (
     HEIST_COOLDOWN_SECONDS, HEIST_SHOT_SECONDS, HEIST_STAGE_SECONDS,
     HEIST_LOBBY_SECONDS, HEIST_BUY_IN, HEIST_MAX_CREW,
@@ -524,6 +525,20 @@ async def collect_gear(guild: discord.Guild, players: list) -> dict:
     return counts
 
 
+async def collect_houses(guild: discord.Guild, players: list) -> list:
+    """The house_id each crew member owns, None for anyone who rents.
+
+    A list rather than a set because house_perks decides what stacking means,
+    not this function - deduplicating here would quietly bake that decision in
+    at the wrong layer.
+    """
+    houses = []
+    for pid in players:
+        house = await db.get_player_house(pid, guild.id)
+        houses.append(house[0] if house else None)
+    return houses
+
+
 async def spend_c4(guild: discord.Guild, players: list, amount: int):
     """Burns `amount` C4 across the crew, taking from whoever has it.
 
@@ -597,8 +612,16 @@ async def run_job(message: discord.Message, guild: discord.Guild, session: Heist
     # already include it - a bonus the player can't see may as well not exist.
     gear_counts = await collect_gear(guild, session.players)
     bonus = logic.gear_bonus(gear_counts, approach_key)
-    if bonus:
-        chance = max(logic.MIN_SUCCESS, min(logic.MAX_SUCCESS, chance + bonus))
+
+    # A Mansion on the crew is worth a little on top - flat, and it doesn't
+    # stack, so six mansion owners are worth the same as one. Counted here with
+    # the gear so the single clamp below covers both and nothing can breach
+    # MAX_SUCCESS by arriving through a second door.
+    house_bonus = perks.house_heist_bonus(await collect_houses(guild, session.players))
+
+    if bonus or house_bonus:
+        chance = max(logic.MIN_SUCCESS,
+                     min(logic.MAX_SUCCESS, chance + bonus + house_bonus))
 
     # C4 is the only consumable, and only the sticks that actually bought a
     # bonus get burned. Spend it now, while the job is committed either way -
@@ -614,6 +637,8 @@ async def run_job(message: discord.Message, guild: discord.Guild, session: Heist
     log = []
     if bonus:
         log.append(f"*The crew's gear is worth **+{bonus}%** on this approach.*")
+    if house_bonus:
+        log.append(f"*Somebody on this crew owns a Mansion. **+{house_bonus}%**.*")
     if spent:
         log.append(f"*{spent}x C4 burned on the door.*")
     betrayals: dict[int, bool] = {}
