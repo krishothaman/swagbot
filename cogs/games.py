@@ -4,10 +4,13 @@ from discord import app_commands
 from discord.ext import commands
 
 import database as db
-from config import MIN_BET
+import casino_logic as casino
 from cogs.quests import record_event
 
-SLOT_SYMBOLS = ["🍒", "🍋", "🍇", "🍉", "⭐", "💎"]
+# The reel and the payout table live in casino_logic so the Casino Owner's hub
+# plays the identical game - a button can't invoke a slash command, so the hub
+# runs the game itself and would otherwise need its own copy of the odds.
+SLOT_SYMBOLS = casino.SLOT_SYMBOLS
 
 
 class Games(commands.Cog):
@@ -21,22 +24,20 @@ class Games(commands.Cog):
         app_commands.Choice(name="Tails", value="tails"),
     ])
     async def coinflip(self, interaction: discord.Interaction, bet: int, choice: app_commands.Choice[str]):
-        if bet < MIN_BET:
-            await interaction.response.send_message(f"Minimum bet is **{MIN_BET}** coins.", ephemeral=True)
-            return
-
         balance = await db.get_balance(interaction.user.id, interaction.guild.id)
-        if balance < bet:
-            await interaction.response.send_message(
-                f"You don't have enough coins. Your balance: **{balance}**", ephemeral=True
-            )
+        problem = casino.validate_bet(bet, balance)
+        if problem:
+            await interaction.response.send_message(problem, ephemeral=True)
             return
 
         await record_event(interaction.user.id, interaction.guild.id, "gamble_coins", bet)
 
-        result = random.choice(["heads", "tails"])
+        result = casino.coinflip_flip(random)
         won = result == choice.value
-        payout = bet if won else -bet
+        payout = casino.coinflip_payout(bet, won)
+        # Deliberately NOT pay_with_boost: the house earnings boost covers
+        # work, dailies and quests. Boosting a win here would make laundering
+        # coins through a coinflip a better rate than any honest job.
         new_balance = await db.update_balance(interaction.user.id, interaction.guild.id, payout)
 
         outcome = f"🎉 It landed on **{result}** - you win **{bet}** coins!" if won \
@@ -47,32 +48,24 @@ class Games(commands.Cog):
     @app_commands.command(name="slots", description="Spin the slot machine")
     @app_commands.describe(bet="How many coins to bet")
     async def slots(self, interaction: discord.Interaction, bet: int):
-        if bet < MIN_BET:
-            await interaction.response.send_message(f"Minimum bet is **{MIN_BET}** coins.", ephemeral=True)
-            return
-
         balance = await db.get_balance(interaction.user.id, interaction.guild.id)
-        if balance < bet:
-            await interaction.response.send_message(
-                f"You don't have enough coins. Your balance: **{balance}**", ephemeral=True
-            )
+        problem = casino.validate_bet(bet, balance)
+        if problem:
+            await interaction.response.send_message(problem, ephemeral=True)
             return
 
         await record_event(interaction.user.id, interaction.guild.id, "gamble_coins", bet)
 
-        spin = [random.choice(SLOT_SYMBOLS) for _ in range(3)]
+        spin = casino.spin(random)
         display = " | ".join(spin)
+        payout, kind = casino.slots_payout(spin, bet)
+        outcome = {
+            "jackpot": f"🎰 JACKPOT! All three match! +{payout} coins",
+            "pair": f"🎰 Two match! +{payout} coins",
+            "miss": f"🎰 No match. {payout} coins",
+        }[kind]
 
-        if spin[0] == spin[1] == spin[2]:
-            payout = bet * 10
-            outcome = f"🎰 JACKPOT! All three match! +{payout} coins"
-        elif spin[0] == spin[1] or spin[1] == spin[2] or spin[0] == spin[2]:
-            payout = bet * 2
-            outcome = f"🎰 Two match! +{payout} coins"
-        else:
-            payout = -bet
-            outcome = f"🎰 No match. {payout} coins"
-
+        # Not boosted by your house - see the note in coinflip above.
         new_balance = await db.update_balance(interaction.user.id, interaction.guild.id, payout)
 
         embed = discord.Embed(title="Slots", description=display, color=discord.Color.purple())
