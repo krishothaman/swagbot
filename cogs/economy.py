@@ -7,22 +7,14 @@ from discord.ext import commands
 import database as db
 from config import DAILY_REWARD, DAILY_COOLDOWN_SECONDS, WORK_MIN_REWARD, WORK_MAX_REWARD, WORK_COOLDOWN_SECONDS
 from cogs.quests import record_event
+# Re-exported: cogs/heist.py has always imported format_seconds from here, and
+# it stays importable from here even though the body moved to ui.py.
+from ui import format_seconds
 
 JOBS = [
     "delivery driver", "street musician", "dog walker", "barista",
     "freelance coder", "mechanic", "chef", "taxi driver",
 ]
-
-
-def format_seconds(seconds: float) -> str:
-    seconds = int(seconds)
-    hours, remainder = divmod(seconds, 3600)
-    minutes, secs = divmod(remainder, 60)
-    if hours:
-        return f"{hours}h {minutes}m"
-    if minutes:
-        return f"{minutes}m {secs}s"
-    return f"{secs}s"
 
 
 class Economy(commands.Cog):

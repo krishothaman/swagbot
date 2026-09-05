@@ -156,6 +156,7 @@ async def init_db():
             house_id TEXT NOT NULL,
             purchased_at REAL NOT NULL,
             upgraded_at REAL,
+            last_collect_at REAL NOT NULL DEFAULT 0,
             PRIMARY KEY (user_id, guild_id)
         )
     """)
@@ -168,6 +169,13 @@ async def init_db():
             PRIMARY KEY (user_id, guild_id, item_id)
         )
     """)
+    # Databases that predate /house collect have no rent ledger. Defaulting to
+    # 0 is deliberate: house_perks.days_accrued() reads an unstamped ledger as
+    # owing nothing, so an existing tenant starts accruing from their first
+    # collect rather than being handed 54 years of back rent.
+    await _ensure_columns(_db, "player_houses", {
+        "last_collect_at": "REAL NOT NULL DEFAULT 0",
+    })
     await _db.commit()
 async def seed_npc_data():
     db = get_db()
@@ -575,25 +583,66 @@ async def get_player_house(user_id: int, guild_id: int):
 
 async def set_player_house(user_id: int, guild_id: int, house_id: str, is_upgrade: bool = False):
     """Buys or upgrades into a house. One house per player, so an upgrade
-    overwrites the existing row and stamps upgraded_at."""
+    overwrites the existing row and stamps upgraded_at.
+
+    Both paths reset last_collect_at to now. On a fresh purchase that stops the
+    unstamped-ledger default from paying out back rent; on an upgrade it closes
+    the hole where you sit in a Studio for a week, move into the Mansion, and
+    collect those seven days at the Mansion's rate. The cost is that upgrading
+    forfeits whatever rent had accrued - collect before you move up.
+    """
     db = get_db()
     now = time.time()
     if is_upgrade:
         await db.execute(
-            """INSERT INTO player_houses (user_id, guild_id, house_id, purchased_at, upgraded_at)
-               VALUES (?, ?, ?, ?, ?)
+            """INSERT INTO player_houses
+                   (user_id, guild_id, house_id, purchased_at, upgraded_at, last_collect_at)
+               VALUES (?, ?, ?, ?, ?, ?)
                ON CONFLICT(user_id, guild_id)
-               DO UPDATE SET house_id = excluded.house_id, upgraded_at = excluded.upgraded_at""",
-            (user_id, guild_id, house_id, now, now),
+               DO UPDATE SET house_id = excluded.house_id,
+                             upgraded_at = excluded.upgraded_at,
+                             last_collect_at = excluded.last_collect_at""",
+            (user_id, guild_id, house_id, now, now, now),
         )
     else:
         await db.execute(
-            """INSERT INTO player_houses (user_id, guild_id, house_id, purchased_at, upgraded_at)
-               VALUES (?, ?, ?, ?, NULL)
+            """INSERT INTO player_houses
+                   (user_id, guild_id, house_id, purchased_at, upgraded_at, last_collect_at)
+               VALUES (?, ?, ?, ?, NULL, ?)
                ON CONFLICT(user_id, guild_id)
-               DO UPDATE SET house_id = excluded.house_id, purchased_at = excluded.purchased_at""",
-            (user_id, guild_id, house_id, now),
+               DO UPDATE SET house_id = excluded.house_id,
+                             purchased_at = excluded.purchased_at,
+                             last_collect_at = excluded.last_collect_at""",
+            (user_id, guild_id, house_id, now, now),
         )
+    await db.commit()
+
+
+async def get_house_rent_stamp(user_id: int, guild_id: int) -> float:
+    """When rent was last collected. 0 means never - see house_perks.
+
+    Deliberately its own query rather than another column on get_player_house():
+    that function returns a positional tuple three call sites unpack by hand,
+    and widening it to carry a timestamp nobody there uses is not worth it.
+    """
+    db = get_db()
+    async with db.execute(
+        "SELECT last_collect_at FROM player_houses WHERE user_id = ? AND guild_id = ?",
+        (user_id, guild_id),
+    ) as cursor:
+        row = await cursor.fetchone()
+        return row[0] if row else 0
+
+
+async def set_house_rent_stamp(user_id: int, guild_id: int, when: float = None):
+    """Moves the rent ledger forward. `when` is explicit rather than always
+    time.time() so a collection can advance by exactly the days it paid for,
+    leaving a part-finished day on the clock instead of throwing it away."""
+    db = get_db()
+    await db.execute(
+        "UPDATE player_houses SET last_collect_at = ? WHERE user_id = ? AND guild_id = ?",
+        (time.time() if when is None else when, user_id, guild_id),
+    )
     await db.commit()
 
 

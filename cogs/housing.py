@@ -1,12 +1,14 @@
 import random
+import time
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
 import database as db
+import house_perks as perks
 from config import HOUSE_SELL_RATIO, HOUSE_LEVEL_REQUIREMENTS
-from ui import build_items_embed
+from ui import build_items_embed, format_seconds
 
 LANDLORD_ID = "landlord"
 
@@ -228,6 +230,63 @@ async def purchase_house(user_id: int, guild_id: int, tier: int) -> str:
     )
 
 
+async def pay_with_boost(user_id: int, guild_id: int, amount: int):
+    """Credit `amount`, plus whatever the player's house adds on top.
+
+    The one place the earnings boost is applied, so /work, /daily, quest
+    rewards and anything added later all agree on what the boost means without
+    each re-implementing the percentage. Returns (base, bonus, new_balance) so
+    the caller can show the bonus - a perk the player can't see may as well not
+    exist.
+    """
+    house = await db.get_player_house(user_id, guild_id)
+    house_id = house[0] if house else None
+    total = perks.apply_boost(amount, house_id)
+    new_balance = await db.update_balance(user_id, guild_id, total)
+    return amount, total - amount, new_balance
+
+
+async def collect_rent(user_id: int, guild_id: int) -> str:
+    """Hand over whatever rent has piled up since the last collection."""
+    house = await db.get_player_house(user_id, guild_id)
+    if not house:
+        return "You don't collect anything. You don't own anything."
+
+    house_id, name, tier, price, storage_slots, description, purchased_at, upgraded_at = house
+    rate = perks.rent_rate(house_id)
+    stamp = await db.get_house_rent_stamp(user_id, guild_id)
+    now = time.time()
+
+    # Bought their place before rent existed, so the ledger is at its 0 default.
+    # Open it now rather than reading 0 as "collecting since 1970".
+    if stamp <= 0:
+        await db.set_house_rent_stamp(user_id, guild_id, now)
+        return (
+            f"Ledger's open on the **{name}**. **{rate:,}** a day from here on. "
+            "Come back tomorrow."
+        )
+
+    days = perks.days_accrued(stamp, now)
+    if days <= 0:
+        wait = perks.seconds_until_next_day(stamp, now)
+        return f"Nothing's due yet. Next **{rate:,}** in **{format_seconds(wait)}**."
+
+    owed = rate * days
+    new_balance = await db.update_balance(user_id, guild_id, owed)
+    await db.set_house_rent_stamp(user_id, guild_id, perks.advance_stamp(stamp, now))
+
+    capped = ""
+    if days >= perks.RENT_CAP_DAYS:
+        capped = (
+            f" That's the {perks.RENT_CAP_DAYS} day ceiling — "
+            "anything older than that, I already spent."
+        )
+    return (
+        f"**{owed:,}** coins off the **{name}**. {days} day(s) at {rate:,}.{capped}\n"
+        f"Balance: **{new_balance:,}**"
+    )
+
+
 async def sell_house(user_id: int, guild_id: int) -> str:
     house = await db.get_player_house(user_id, guild_id)
     if not house:
@@ -301,6 +360,11 @@ class Housing(commands.Cog):
     ])
     async def house_buy(self, interaction: discord.Interaction, tier: app_commands.Choice[int]):
         message = await purchase_house(interaction.user.id, interaction.guild.id, tier.value)
+        await interaction.response.send_message(message)
+
+    @house.command(name="collect", description="Collect the rent your place has earned")
+    async def house_collect(self, interaction: discord.Interaction):
+        message = await collect_rent(interaction.user.id, interaction.guild.id)
         await interaction.response.send_message(message)
 
     @house.command(name="sell", description="Sell your house back to the landlord")

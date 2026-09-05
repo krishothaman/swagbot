@@ -93,6 +93,29 @@ def rent_owed(house_id, last_collect, now: float = None) -> int:
     return rent_rate(house_id) * days_accrued(last_collect, now)
 
 
+def advance_stamp(last_collect, now: float = None) -> float:
+    """Where the ledger sits after a collection.
+
+    Not simply `now`. Collecting at three and a half days pays three, and the
+    half day that hadn't matured yet has to survive - otherwise collecting
+    often quietly costs you more than collecting rarely, which is backwards.
+
+    So the new stamp is `now` minus the part-day still in progress. Past the
+    cap that part-day is all that carries: the surplus days are forfeited,
+    which is the entire point of having a cap.
+    """
+    if now is None:
+        import time
+        now = time.time()
+    if not last_collect or last_collect <= 0:
+        return now
+    elapsed = now - last_collect
+    if elapsed <= 0:
+        return last_collect
+    part_day = elapsed % SECONDS_PER_DAY
+    return now - part_day
+
+
 def seconds_until_next_day(last_collect, now: float = None) -> int:
     """How long until one more day of rent lands, for the "come back later"
     line. Meaningless once you're at the cap, so the caller checks that first."""
