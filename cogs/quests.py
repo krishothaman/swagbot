@@ -181,8 +181,16 @@ async def turn_in_quest(user_id: int, guild_id: int, quest_id: str) -> str:
         if not taken:
             return "You don't have the items any more."
 
+    house_bonus = 0
     if quest["reward_coins"]:
-        await db.update_balance(user_id, guild_id, quest["reward_coins"])
+        # Imported here rather than at module scope: cogs.housing is fine to
+        # import from, but cogs.economy imports this module, and pulling
+        # housing in at the top would put a third cog in that chain for no
+        # reason. The reward line below is the only thing that needs it.
+        from cogs.housing import pay_with_boost
+        _base, house_bonus, _balance = await pay_with_boost(
+            user_id, guild_id, quest["reward_coins"]
+        )
     if quest["reward_xp"]:
         xp, level = await db.add_xp(user_id, guild_id, quest["reward_xp"])
         await apply_level_up(user_id, guild_id, xp, level)
@@ -199,6 +207,9 @@ async def turn_in_quest(user_id: int, guild_id: int, quest_id: str) -> str:
     await db.set_player_quest_status(user_id, guild_id, quest_id, "completed")
 
     message = f"**{quest['title']}** complete. You got: {describe_rewards(quest)}"
+    if house_bonus:
+        from cogs.housing import house_cut
+        message += house_cut(house_bonus)
     if quest["repeatable"]:
         message += f"\nBack in {daily_reset.describe_wait()}."
     return message

@@ -7,6 +7,7 @@ from discord.ext import commands
 import database as db
 from config import DAILY_REWARD, DAILY_COOLDOWN_SECONDS, WORK_MIN_REWARD, WORK_MAX_REWARD, WORK_COOLDOWN_SECONDS
 from cogs.quests import record_event
+from cogs.housing import pay_with_boost, house_cut
 # Re-exported: cogs/heist.py has always imported format_seconds from here, and
 # it stays importable from here even though the body moved to ui.py.
 from ui import format_seconds
@@ -42,10 +43,11 @@ class Economy(commands.Cog):
             )
             return
 
-        new_balance = await db.update_balance(user_id, guild_id, DAILY_REWARD)
+        base, bonus, new_balance = await pay_with_boost(user_id, guild_id, DAILY_REWARD)
         await db.set_cooldown(user_id, guild_id, "last_daily")
         await interaction.response.send_message(
-            f"You claimed your daily reward of **{DAILY_REWARD}** coins. New balance: **{new_balance}**"
+            f"You claimed your daily reward of **{base}** coins{house_cut(bonus)}. "
+            f"New balance: **{new_balance}**"
         )
 
     @app_commands.command(name="work", description="Work to earn some coins")
@@ -64,12 +66,13 @@ class Economy(commands.Cog):
 
         earnings = random.randint(WORK_MIN_REWARD, WORK_MAX_REWARD)
         job = random.choice(JOBS)
-        new_balance = await db.update_balance(user_id, guild_id, earnings)
+        base, bonus, new_balance = await pay_with_boost(user_id, guild_id, earnings)
         await db.set_cooldown(user_id, guild_id, "last_work")
         # Counted after the cooldown check, so only real shifts count.
         await record_event(user_id, guild_id, "work_count", 1)
         await interaction.response.send_message(
-            f"You worked as a **{job}** and earned **{earnings}** coins. New balance: **{new_balance}**"
+            f"You worked as a **{job}** and earned **{base}** coins{house_cut(bonus)}. "
+            f"New balance: **{new_balance}**"
         )
 
     @app_commands.command(name="transfer", description="Send coins to another user")

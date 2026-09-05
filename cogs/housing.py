@@ -74,8 +74,15 @@ async def landlord_embed(user_id: int, guild_id: int) -> discord.Embed:
     if house:
         house_id, name, tier, price, storage_slots, description, purchased_at, upgraded_at = house
         used = await db.get_house_storage_used(user_id, guild_id)
+        stamp = await db.get_house_rent_stamp(user_id, guild_id)
+        owed = perks.rent_owed(house_id, stamp)
         embed.add_field(name="Your Unit", value=name, inline=True)
         embed.add_field(name="Storage", value=f"{used}/{storage_slots}", inline=True)
+        embed.add_field(
+            name="Rent waiting",
+            value=f"**{owed:,}** coins" if owed else "nothing yet",
+            inline=True,
+        )
     else:
         embed.add_field(name="Your Unit", value="None", inline=True)
     embed.set_footer(text="Landlord")
@@ -246,6 +253,16 @@ async def pay_with_boost(user_id: int, guild_id: int, amount: int):
     return amount, total - amount, new_balance
 
 
+def house_cut(bonus: int) -> str:
+    """The " (+N from your place)" tail every boosted payout appends.
+
+    Empty string when there's no bonus, so a player with no house sees the
+    line they've always seen. Shared so /work, /daily and quest turn-ins can't
+    drift into describing the same perk three different ways.
+    """
+    return f" *(+{bonus} from your place)*" if bonus else ""
+
+
 async def collect_rent(user_id: int, guild_id: int) -> str:
     """Hand over whatever rent has piled up since the last collection."""
     house = await db.get_player_house(user_id, guild_id)
@@ -333,6 +350,25 @@ class Housing(commands.Cog):
             embed.add_field(name="Tier", value=str(tier), inline=True)
             embed.add_field(name="Storage", value=f"{used}/{storage_slots}", inline=True)
             embed.add_field(name="Sells back for", value=f"{int(price * HOUSE_SELL_RATIO):,} coins", inline=True)
+
+            stamp = await db.get_house_rent_stamp(interaction.user.id, interaction.guild.id)
+            owed = perks.rent_owed(house_id, stamp)
+            embed.add_field(
+                name="Rent",
+                value=f"{perks.rent_rate(house_id):,}/day · **{owed:,}** waiting",
+                inline=True,
+            )
+            embed.add_field(
+                name="Earnings",
+                value=f"+{perks.boost_percent(house_id)}% on work, dailies and quests",
+                inline=True,
+            )
+            if perks.HOUSE_PERKS.get(house_id, {}).get("heist"):
+                embed.add_field(
+                    name="Heist",
+                    value=f"+{perks.HOUSE_PERKS[house_id]['heist']}% for the whole crew",
+                    inline=True,
+                )
         else:
             embed = discord.Embed(title="Available Units", color=discord.Color.dark_grey())
             embed.set_footer(text="You don't own anything yet.")
@@ -345,8 +381,16 @@ class Housing(commands.Cog):
         for house_id, name, tier, price, storage_slots, description in await db.get_houses():
             required = HOUSE_LEVEL_REQUIREMENTS.get(tier, 0)
             marker = " — *yours*" if house_id == owned_id else ""
+            perk_line = (
+                f"{perks.rent_rate(house_id):,}/day rent · "
+                f"+{perks.boost_percent(house_id)}% earnings"
+            )
+            heist = perks.HOUSE_PERKS.get(house_id, {}).get("heist")
+            if heist:
+                perk_line += f" · +{heist}% heist"
             lines.append(
                 f"**{name}**{marker}\n{price:,} coins · {storage_slots} slots · level {required}+"
+                f"\n{perk_line}"
             )
         embed.add_field(name="Every unit", value="\n\n".join(lines), inline=False)
         await interaction.response.send_message(embed=embed)
