@@ -1,13 +1,4 @@
-"""Heist math. Pure functions only - no Discord, no database.
-
-Everything here is deterministic when you hand it a seeded RNG, which is the
-whole point: a timing-based multiplayer feature is nearly impossible to test
-through the UI, so all the rules that actually decide money live here instead.
-cogs/heist.py is just the shell that collects input and displays results.
-
-TUNING: the numbers in APPROACHES and NPC_CREW are the balance dials. Change
-them here, nothing else needs to know.
-"""
+#bunch of heist math
 
 import random
 
@@ -17,12 +8,11 @@ SUCCESS = "success"
 MINOR_FAILURE = "minor_failure"
 BAD_FAILURE = "bad_failure"
 
-# How far past the success threshold still counts as "scraped by". Roll beyond
-# this and it's a bad night - items lost, and you get shot.
-MINOR_FAILURE_BAND = 20
+
+MINOR_FAILURE_BAND = 20 #chances of failure
 
 
-# --- Approaches ---------------------------------------------------------
+
 # success: base chance before crew bonuses
 # payout:  multiplier on the base take
 # requires_item: item_id the player must hold (not consumed) - None for open
@@ -52,19 +42,8 @@ APPROACHES = {
 }
 
 
-# --- Hireable NPC crew --------------------------------------------------
-# cost:  coins up front
-# bonus: percentage points added to success
-# cut:   percent of the take they skim before players split
-#
-# The cut is what makes crew size a real decision instead of a free upgrade:
-# more hands means better odds but a thinner slice each.
+#  Hireable NPC crew 
 
-# Tuned against simulation (see the EV table in the heist notes): the crew has
-# to be worth hiring for a risky approach and NOT worth it for a safe one.
-# Earlier values made crew strictly negative EV everywhere, which turned the
-# whole mechanic into a trap. If you retune these, re-run the EV sim - it is
-# very easy to make crew pointless again.
 NPC_CREW = {
     "wheelman": {
         "name": "The Wheelman",

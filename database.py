@@ -212,14 +212,7 @@ async def seed_npc_data():
 async def seed_item_data():
     """Loads item content from item_data.py.
 
-    Uses INSERT OR REPLACE (not OR IGNORE) so editing a price in that file
-    actually applies on the next boot - with OR IGNORE the row already exists
-    and every edit is silently dropped, which is the trap quests used to have.
-
-    Removing an item from the file deletes it here, and takes any copies
-    players are holding with it. Leaving those rows behind would be worse:
-    get_inventory INNER JOINs items, so an orphaned row is invisible in game
-    but still occupies a house storage slot forever.
+    Uses INSERT OR REPLACE 
     """
     from item_data import ITEMS
 
@@ -242,18 +235,23 @@ async def seed_item_data():
 
 
 async def seed_house_data():
+    """Loads the house catalog.
+
+    INSERT OR REPLACE is used so editing a house description or price in this file actually
+    applies on the next boot.
+    """
     db = get_db()
 
     houses = [
-        ("studio", "Studio", 1, 2500, 10,
-         "One room, one window, one lock that mostly works."),
-        ("apartment", "Apartment", 2, 12000, 30,
+        ("studio", "Studio", 1, 5000, 10,
+         "One room, one window, one lock that mostly works. Dont blame me if you get robbed."),
+        ("apartment", "Apartment", 2, 60000, 30,
          "Real walls. Real neighbors. A door that closes properly."),
-        ("mansion", "Mansion", 3, 60000, 100,
-         "More rooms than you'll ever walk into."),
+        ("mansion", "Mansion", 3, 500000, 100,
+         "More rooms than you'll ever walk into. Hell yeah."),
     ]
     await db.executemany(
-        "INSERT OR IGNORE INTO houses (house_id, name, tier, price, storage_slots, description) "
+        "INSERT OR REPLACE INTO houses (house_id, name, tier, price, storage_slots, description) "
         "VALUES (?, ?, ?, ?, ?, ?)",
         houses,
     )

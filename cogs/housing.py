@@ -262,9 +262,10 @@ class Housing(commands.Cog):
             if current.lower() in name.lower()
         ][:25]
 
-    @house.command(name="info", description="Look at your place, or what's for sale")
+    @house.command(name="info", description="Look at your place, and what's for sale")
     async def house_info(self, interaction: discord.Interaction):
         house = await db.get_player_house(interaction.user.id, interaction.guild.id)
+        owned_id = house[0] if house else None
 
         if house:
             house_id, name, tier, price, storage_slots, description, purchased_at, upgraded_at = house
@@ -272,22 +273,23 @@ class Housing(commands.Cog):
             embed = discord.Embed(title=name, description=description, color=discord.Color.dark_grey())
             embed.add_field(name="Tier", value=str(tier), inline=True)
             embed.add_field(name="Storage", value=f"{used}/{storage_slots}", inline=True)
-            embed.add_field(name="Sells back for", value=f"{int(price * HOUSE_SELL_RATIO)} coins", inline=True)
-            await interaction.response.send_message(embed=embed)
-            return
+            embed.add_field(name="Sells back for", value=f"{int(price * HOUSE_SELL_RATIO):,} coins", inline=True)
+        else:
+            embed = discord.Embed(title="Available Units", color=discord.Color.dark_grey())
+            embed.set_footer(text="You don't own anything yet.")
 
+        # The listing goes out whether you own a place or not. It used to be the
+        # else-branch of the block above, so an owner couldn't see what an upgrade
+        # cost, and a top-tier owner couldn't see prices anywhere - the landlord's
+        # Buy/Upgrade menu filters to tiers above yours and shows nothing at the top.
         lines = []
         for house_id, name, tier, price, storage_slots, description in await db.get_houses():
             required = HOUSE_LEVEL_REQUIREMENTS.get(tier, 0)
+            marker = " — *yours*" if house_id == owned_id else ""
             lines.append(
-                f"**{name}** — {price} coins · {storage_slots} slots · level {required}+\n{description}"
+                f"**{name}**{marker}\n{price:,} coins · {storage_slots} slots · level {required}+"
             )
-        embed = discord.Embed(
-            title="Available Units",
-            description="\n\n".join(lines),
-            color=discord.Color.dark_grey(),
-        )
-        embed.set_footer(text="You don't own anything yet.")
+        embed.add_field(name="Every unit", value="\n\n".join(lines), inline=False)
         await interaction.response.send_message(embed=embed)
 
     @house.command(name="buy", description="Buy or upgrade into a house")
