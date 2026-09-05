@@ -72,13 +72,23 @@ MAX_NPC_CREW = 3
 
 # Odds never hit certainty in either direction - a heist is always a gamble.
 #
-# MAX_SUCCESS must leave room above ROUGH_BAND or "blown" becomes unreachable:
-# a stage is blown when roll > chance + ROUGH_BAND, so with chance 90 and a
-# band of 15 the threshold lands at 105 and a d100 can never beat it. That bug
-# made a full-crew stealth run win 100% of the time. Keep
-# MAX_SUCCESS + ROUGH_BAND comfortably under 100.
+# A stage is blown when roll > chance + band, so a high chance plus a wide band
+# can push that threshold past 100 and make "blown" unreachable - that bug once
+# made a full-crew stealth run win 100% of the time. The invariant used to be
+# held by hand ("keep MAX_SUCCESS + ROUGH_BAND under 100"), which meant the
+# ceiling was pinned at 80 and any bonus above it was silently thrown away:
+# gear was worth literally nothing on stealth.
+#
+# resolve_stage now enforces it directly instead, shrinking the rough band when
+# the odds are high enough to crowd blown out. That frees the ceiling to rise
+# without reintroducing the guaranteed-win bug, and leaves mid-range odds
+# untouched - at 50% the band is still the full 15.
 MIN_SUCCESS = 5
-MAX_SUCCESS = 80
+MAX_SUCCESS = 88
+
+# However good it gets, a stage goes wrong this often. The floor is what makes
+# "nothing is a sure thing" true rather than aspirational.
+BLOWN_FLOOR = 5
 
 # Each extra *human* on the crew. Small, because humans also split the pot.
 PLAYER_BONUS = 6
@@ -91,6 +101,56 @@ def calculate_success(approach_key: str, npc_ids: list, player_count: int = 1) -
     chance += sum(NPC_CREW[n]["bonus"] for n in npc_ids if n in NPC_CREW)
     chance += PLAYER_BONUS * max(0, player_count - 1)
     return max(MIN_SUCCESS, min(MAX_SUCCESS, chance))
+
+
+#  Gear
+#
+# Three items, three different jobs, deliberately non-overlapping:
+#   masks - help you avoid the fight (odds, below)
+#   guns  - help you WIN the fight (ammo in the cop stage, see GUN_SHOTS)
+#   C4    - helps you force a door, and makes the fight louder
+#
+# Guns are on purpose absent from this table. They already earn their price as
+# shots in the shootout; paying them a general odds bonus too would be getting
+# paid twice for one purchase, and would flatten all three items back into a
+# single "+N for owning stuff".
+#
+# Caps are on the CREW total, not per person, so a six-man crew all wearing
+# masks isn't six times better than a two-man crew - it's the same +3. Gear is
+# meant to be a floor under a bad approach, not a substitute for planning.
+MASK_BONUS = 1
+MASK_CAP = 3
+
+# C4 only helps where a door is the problem. Free +0 on stealth is the point:
+# gear should be a decision, not a checklist you tick before every job.
+C4_BONUS = {"force": 6, "inside_job": 2, "stealth": 0}
+C4_CAP = 12
+
+
+def gear_bonus(item_counts: dict, approach_key: str) -> int:
+    """Success bonus from gear the crew is carrying.
+
+    item_counts is {item_id: how many the whole crew holds} - already resolved
+    from inventories by the caller, so this stays pure and testable.
+    """
+    masks = min(item_counts.get("mask", 0) * MASK_BONUS, MASK_CAP)
+    per_c4 = C4_BONUS.get(approach_key, 0)
+    c4 = min(item_counts.get("c4", 0) * per_c4, C4_CAP)
+    return masks + c4
+
+
+def c4_spent(item_counts: dict, approach_key: str) -> int:
+    """How many C4 the job actually burns.
+
+    Only the ones that bought a bonus are consumed - past the cap, or on an
+    approach where C4 does nothing, they stay in the bag. Charging someone
+    3000 coins for an item that did nothing on this job would be a trap.
+    """
+    per_c4 = C4_BONUS.get(approach_key, 0)
+    if per_c4 <= 0:
+        return 0
+    held = item_counts.get("c4", 0)
+    return min(held, C4_CAP // per_c4)
 
 
 def roll_outcome(success_chance: int, rng=random):
@@ -226,6 +286,11 @@ STAGES = [
         "prompt": "You're at the doors. How do you want to do this?",
         "bonus": 10,
         "rough_band": 35,
+        # Entry is allowed to be unblowable at high odds - nobody wants the job
+        # to die at the front door before anything has happened. The "nothing is
+        # a sure thing" rule applies to the job as a whole, not to every stage,
+        # so this stage opts out of BLOWN_FLOOR.
+        "blown_floor": 0,
         "choices": {
             "quiet": {"label": "Slip through the side", "success": 5, "loot": 1.0,
                       "flavour": "Side door. Nobody looks up."},
@@ -272,19 +337,31 @@ def stage_rough_band(index: int) -> int:
     return STAGES[index].get("rough_band", ROUGH_BAND)
 
 
+def stage_blown_floor(index: int) -> int:
+    """Minimum chance this stage goes wrong. 0 means it may become unblowable."""
+    return STAGES[index].get("blown_floor", BLOWN_FLOOR)
+
+
 def stage_choice(index: int, choice_key: str) -> dict:
     if choice_key == HESITATE:
         return HESITATE_CHOICE
     return STAGES[index]["choices"][choice_key]
 
 
-def resolve_stage(chance: int, rng=random, band: int = ROUGH_BAND):
+def resolve_stage(chance: int, rng=random, band: int = ROUGH_BAND,
+                  floor: int = BLOWN_FLOOR):
     """Rolls one stage. Returns (result, roll).
 
     `band` is the stage's rough band - pass stage_rough_band(index) so the
     entry stage's wider band applies.
+
+    `floor` is the minimum chance of blowing it. The band is squeezed to make
+    room for it, so clean + rough can never crowd blown out entirely no matter
+    how high the odds climb. Pass floor=0 for a stage that is allowed to become
+    unblowable - the entry stage does exactly that, on purpose.
     """
     chance = max(MIN_SUCCESS, min(MAX_SUCCESS, chance))
+    band = min(band, max(0, 100 - floor - chance))
     roll = rng.randint(1, 100)
     if roll <= chance:
         return STAGE_CLEAN, roll
@@ -304,13 +381,20 @@ def choice_odds(chance: int, stage_index: int, choice_key: str) -> int:
     return max(MIN_SUCCESS, min(MAX_SUCCESS, shifted))
 
 
-def blown_chance(effective_chance: int, band: int = ROUGH_BAND) -> int:
+def blown_chance(effective_chance: int, band: int = ROUGH_BAND,
+                 floor: int = BLOWN_FLOOR) -> int:
     """Percent chance this call blows the job outright.
 
     Not the same as 100 - success: a miss inside the stage's rough band only
     goes rough and the job continues. This is the part players actually need
     to see, so pass the stage's own band.
+
+    Squeezes the band exactly the way resolve_stage does. If these two ever
+    disagree the number on the button is a lie, which is how "I had 80% and
+    still got blown" happened the first time.
     """
+    effective_chance = max(MIN_SUCCESS, min(MAX_SUCCESS, effective_chance))
+    band = min(band, max(0, 100 - floor - effective_chance))
     return max(0, 100 - min(100, effective_chance + band))
 
 

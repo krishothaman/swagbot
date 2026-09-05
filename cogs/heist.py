@@ -497,7 +497,9 @@ def stage_embed(session: HeistSession, stage: dict, index: int,
     risk = []
     for key, data in stage["choices"].items():
         odds = logic.choice_odds(chance, index, key)
-        blown = logic.blown_chance(odds, logic.stage_rough_band(index))
+        blown = logic.blown_chance(
+            odds, logic.stage_rough_band(index), logic.stage_blown_floor(index)
+        )
         risk.append(f"**{data['label']}** — {odds}% clean · {blown}% blown")
     embed.add_field(name="Your options", value="\n".join(risk), inline=False)
 
@@ -508,6 +510,39 @@ def stage_embed(session: HeistSession, stage: dict, index: int,
 
 
 # --- The job ------------------------------------------------------------
+
+async def collect_gear(guild: discord.Guild, players: list) -> dict:
+    """{item_id: how many the whole crew is carrying}.
+
+    Inventory reads live here so heist_logic stays free of the database. Only
+    the gear ids matter; everything else in a player's bag is ignored.
+    """
+    counts: dict[str, int] = {}
+    for pid in players:
+        for item_id, _name, qty in await db.get_inventory(pid, guild.id):
+            counts[item_id] = counts.get(item_id, 0) + qty
+    return counts
+
+
+async def spend_c4(guild: discord.Guild, players: list, amount: int):
+    """Burns `amount` C4 across the crew, taking from whoever has it.
+
+    Spread rather than billed to the host: the bonus was pooled, so the cost
+    is too. Stops as soon as enough has been taken.
+    """
+    left = amount
+    for pid in players:
+        if left <= 0:
+            return
+        held = next(
+            (qty for item_id, _n, qty in await db.get_inventory(pid, guild.id)
+             if item_id == "c4"),
+            0,
+        )
+        take = min(held, left)
+        if take and await db.remove_item_from_inventory(pid, guild.id, "c4", take):
+            left -= take
+
 
 async def run_job(message: discord.Message, guild: discord.Guild, session: HeistSession):
     """Charges everyone, runs the stages, pays out. Caller handles cleanup."""
@@ -557,11 +592,30 @@ async def run_job(message: discord.Message, guild: discord.Guild, session: Heist
 
     count = len(session.players)
     chance = logic.calculate_success(approach_key, session.npc_ids, count)
+
+    # Gear the crew brought. Counted once, here, so the odds shown on stage 1
+    # already include it - a bonus the player can't see may as well not exist.
+    gear_counts = await collect_gear(guild, session.players)
+    bonus = logic.gear_bonus(gear_counts, approach_key)
+    if bonus:
+        chance = max(logic.MIN_SUCCESS, min(logic.MAX_SUCCESS, chance + bonus))
+
+    # C4 is the only consumable, and only the sticks that actually bought a
+    # bonus get burned. Spend it now, while the job is committed either way -
+    # deferring to the end would let a blown heist hand the charges back.
+    spent = logic.c4_spent(gear_counts, approach_key)
+    if spent:
+        await spend_c4(guild, session.players, spent)
+
     gross = logic.calculate_take(
         approach_key, HEIST_BASE_PAYOUT_MIN, HEIST_BASE_PAYOUT_MAX, count
     )
     loot_mult = 1.0
     log = []
+    if bonus:
+        log.append(f"*The crew's gear is worth **+{bonus}%** on this approach.*")
+    if spent:
+        log.append(f"*{spent}x C4 burned on the door.*")
     betrayals: dict[int, bool] = {}
     if dropped:
         log.append(f"*{len(dropped)} couldn't cover their share and stayed behind.*")
@@ -580,7 +634,9 @@ async def run_job(message: discord.Message, guild: discord.Guild, session: Heist
 
         stage_chance = chance + logic.stage_bonus(index) + choice["success"]
         result, roll = logic.resolve_stage(
-            stage_chance, band=logic.stage_rough_band(index)
+            stage_chance,
+            band=logic.stage_rough_band(index),
+            floor=logic.stage_blown_floor(index),
         )
 
         if result == logic.STAGE_BLOWN:

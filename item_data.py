@@ -51,6 +51,15 @@ ITEMS = [
         "npc_id": "shady_merchant",
         "description": "hehe.",
     },
+    {
+        "item_id": "mask",
+        "name": "Mask",
+        "price": 800,
+        "npc_id": "shady_merchant",
+        # Heist gear. Not consumed - buy once, wear it every job. Helps most on
+        # the loud approaches; stealth is already near the success ceiling.
+        "description": "nobody remembers a face they never saw.",
+    },
 
     # --- The Gun Man ------------------------------------------------------
     # Level-gated behind GUNMAN_LEVEL_REQUIREMENT. Guns are permanent once

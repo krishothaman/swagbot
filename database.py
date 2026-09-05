@@ -416,6 +416,23 @@ async def get_player_quest_status(user_id: int, guild_id: int, quest_id: str):
         return row[0] if row else "available"
 
 
+async def get_player_quest_state(user_id: int, guild_id: int, quest_id: str):
+    """Returns (status, completed_at). completed_at is None if never finished.
+
+    get_player_quest_status above returns just the status and stays that way -
+    most callers don't care when it happened. The daily reset does: it needs
+    the timestamp to work out whether a repeatable has come back around yet.
+    """
+    db = get_db()
+    async with db.execute(
+        "SELECT status, completed_at FROM player_quests "
+        "WHERE user_id = ? AND guild_id = ? AND quest_id = ?",
+        (user_id, guild_id, quest_id),
+    ) as cursor:
+        row = await cursor.fetchone()
+        return (row[0], row[1]) if row else ("available", None)
+
+
 async def get_player_quests(user_id: int, guild_id: int, status: str = None):
     """Returns [(quest_id, status, progress)] - optionally filtered by status."""
     db = get_db()
@@ -485,7 +502,13 @@ async def add_quest_progress(user_id: int, guild_id: int, condition_type: str, a
 
 
 async def clear_player_quest(user_id: int, guild_id: int, quest_id: str):
-    """Removes the row entirely so a repeatable quest becomes available again."""
+    """Wipes a player's record of one quest. Currently unused - kept for /dev.
+
+    DO NOT use this to finish a repeatable quest. Deleting the row erases
+    completed_at, which is the only thing stopping a daily from being
+    re-accepted immediately; that was the infinite-coin bug. Turn-in marks
+    quests 'completed' via set_player_quest_status instead.
+    """
     db = get_db()
     await db.execute(
         "DELETE FROM player_quests WHERE user_id = ? AND guild_id = ? AND quest_id = ?",

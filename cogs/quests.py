@@ -15,6 +15,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+import daily_reset
 import database as db
 from config import MAX_ACTIVE_QUESTS
 from cogs.leveling import apply_level_up
@@ -109,6 +110,32 @@ def describe_rewards(quest: dict) -> str:
     return ", ".join(parts) or "nothing"
 
 
+# --- Availability -------------------------------------------------------
+
+async def quest_availability(user_id: int, guild_id: int, quest: dict):
+    """(is_open, refusal_message) - the ONE place that decides whether a quest
+    can be picked up right now.
+
+    accept_quest and every menu that lists quests go through this. When they
+    each kept their own copy of the status check they could disagree: a daily
+    still on cooldown would be offered in a menu and then refused on accept.
+    """
+    status, completed_at = await db.get_player_quest_state(
+        user_id, guild_id, quest["quest_id"]
+    )
+    if status == "active":
+        return False, "You're already on that one."
+    if status == "completed":
+        if not quest["repeatable"]:
+            return False, "You've already done that one."
+        if not daily_reset.is_available(completed_at):
+            return False, (
+                f"You've already done **{quest['title']}** today. "
+                f"It's back in {daily_reset.describe_wait()}."
+            )
+    return True, None
+
+
 # --- Accept / turn in ---------------------------------------------------
 
 async def accept_quest(user_id: int, guild_id: int, quest_id: str) -> str:
@@ -117,11 +144,9 @@ async def accept_quest(user_id: int, guild_id: int, quest_id: str) -> str:
     if not quest:
         return "That quest doesn't exist."
 
-    status = await db.get_player_quest_status(user_id, guild_id, quest_id)
-    if status == "active":
-        return "You're already on that one."
-    if status == "completed" and not quest["repeatable"]:
-        return "You've already done that one."
+    is_open, refusal = await quest_availability(user_id, guild_id, quest)
+    if not is_open:
+        return refusal
 
     active = await db.count_active_quests(user_id, guild_id)
     if active >= MAX_ACTIVE_QUESTS:
@@ -166,14 +191,17 @@ async def turn_in_quest(user_id: int, guild_id: int, quest_id: str) -> str:
             user_id, guild_id, quest["reward_item_id"], quest["reward_item_qty"]
         )
 
-    # Repeatables drop the row so they can be picked up again; one-shots are
-    # marked completed so they stay done.
-    if quest["repeatable"]:
-        await db.clear_player_quest(user_id, guild_id, quest_id)
-    else:
-        await db.set_player_quest_status(user_id, guild_id, quest_id, "completed")
+    # Everything is marked completed with a timestamp now, repeatable or not.
+    # Repeatables used to have their row DELETED here, which erased the only
+    # record that they'd been done - so they could be re-accepted immediately,
+    # and a "have 500 coins" daily paid out forever without spending anything.
+    # The reset reads completed_at to work out when they come back.
+    await db.set_player_quest_status(user_id, guild_id, quest_id, "completed")
 
-    return f"**{quest['title']}** complete. You got: {describe_rewards(quest)}"
+    message = f"**{quest['title']}** complete. You got: {describe_rewards(quest)}"
+    if quest["repeatable"]:
+        message += f"\nBack in {daily_reset.describe_wait()}."
+    return message
 
 
 async def build_quest_embed(user_id: int, guild_id: int) -> discord.Embed:
@@ -197,17 +225,28 @@ async def build_quest_embed(user_id: int, guild_id: int) -> discord.Embed:
         embed.add_field(name=f"Active (0/{MAX_ACTIVE_QUESTS})",
                         value="Nothing on your plate.", inline=False)
 
-    available = []
+    available, locked = [], []
     for quest in await db.get_quests_by_category("daily"):
-        status = await db.get_player_quest_status(user_id, guild_id, quest["quest_id"])
-        if status == "active":
+        is_open, _ = await quest_availability(user_id, guild_id, quest)
+        if is_open:
+            available.append(f"**{quest['title']}** — {quest['description']}")
             continue
-        if status == "completed" and not quest["repeatable"]:
-            continue
-        available.append(f"**{quest['title']}** — {quest['description']}")
+        status, _done = await db.get_player_quest_state(
+            user_id, guild_id, quest["quest_id"]
+        )
+        if status == "completed":
+            locked.append(quest["title"])
 
     if available:
         embed.add_field(name="Available Dailies", value="\n".join(available), inline=False)
+    if locked:
+        # Say WHY they're gone. A finished daily that silently disappears from
+        # the list reads as a bug.
+        embed.add_field(
+            name=f"Done today — back in {daily_reset.describe_wait()}",
+            value=", ".join(locked),
+            inline=False,
+        )
 
     embed.set_footer(text="NPC quests are offered when you /talk to them.")
     return embed
@@ -263,12 +302,9 @@ class QuestHubView(discord.ui.View):
 
         available = []
         for quest in await db.get_quests_by_category("daily"):
-            status = await db.get_player_quest_status(self.user_id, self.guild_id, quest["quest_id"])
-            if status == "active":
-                continue
-            if status == "completed" and not quest["repeatable"]:
-                continue
-            available.append(quest)
+            is_open, _ = await quest_availability(self.user_id, self.guild_id, quest)
+            if is_open:
+                available.append(quest)
 
         if not available:
             await interaction.response.send_message("No dailies open right now.", ephemeral=True)
