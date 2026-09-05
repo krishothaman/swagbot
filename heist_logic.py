@@ -225,11 +225,28 @@ HESITATE_CHOICE = {
     "flavour": "You stood there too long.",
 }
 
+# Per-stage tuning. A stage may override:
+#   bonus       flat success added before the choice modifier
+#   rough_band  how far a miss can be and still only go rough
+#
+# The entry stage is deliberately forgiving on both. Losing the whole job at
+# the front door - before anything has happened, before anyone has touched the
+# vault - reads as "why did I bother" rather than "that was tense", and Force
+# especially was getting wiped at the door most of the time. A bad entry now
+# usually means you're INSIDE but rattled, carrying a worse chance into the
+# stages that can actually end you.
+#
+# Consequence, on purpose: with a wide enough band a high-odds crew can't be
+# blown at the entry at all. The "nothing is a sure thing" rule applies to the
+# job as a whole, not to every stage of it - the vault and the escape both
+# keep the standard band and can still end the run outright.
 STAGES = [
     {
         "key": "entry",
         "name": "Getting In",
         "prompt": "You're at the doors. How do you want to do this?",
+        "bonus": 10,
+        "rough_band": 35,
         "choices": {
             "quiet": {"label": "Slip through the side", "success": 5, "loot": 1.0,
                       "flavour": "Side door. Nobody looks up."},
@@ -266,21 +283,56 @@ def get_stage(index: int) -> dict:
     return STAGES[index]
 
 
+def stage_bonus(index: int) -> int:
+    """Flat success this stage grants before the crew's choice is applied."""
+    return STAGES[index].get("bonus", 0)
+
+
+def stage_rough_band(index: int) -> int:
+    """How far a miss can land past the chance and still only go rough."""
+    return STAGES[index].get("rough_band", ROUGH_BAND)
+
+
 def stage_choice(index: int, choice_key: str) -> dict:
     if choice_key == HESITATE:
         return HESITATE_CHOICE
     return STAGES[index]["choices"][choice_key]
 
 
-def resolve_stage(chance: int, rng=random):
-    """Rolls one stage. Returns (result, roll)."""
+def resolve_stage(chance: int, rng=random, band: int = ROUGH_BAND):
+    """Rolls one stage. Returns (result, roll).
+
+    `band` is the stage's rough band - pass stage_rough_band(index) so the
+    entry stage's wider band applies.
+    """
     chance = max(MIN_SUCCESS, min(MAX_SUCCESS, chance))
     roll = rng.randint(1, 100)
     if roll <= chance:
         return STAGE_CLEAN, roll
-    if roll <= chance + ROUGH_BAND:
+    if roll <= chance + band:
         return STAGE_ROUGH, roll
     return STAGE_BLOWN, roll
+
+
+def choice_odds(chance: int, stage_index: int, choice_key: str) -> int:
+    """The success chance this call actually rolls at.
+
+    Every stage choice shifts the odds, and resolve_stage clamps the result -
+    so this applies the exact same clamp. The number shown to players has to
+    be the number that gets rolled, or the display is lying to them.
+    """
+    shifted = chance + stage_bonus(stage_index) + stage_choice(stage_index, choice_key)["success"]
+    return max(MIN_SUCCESS, min(MAX_SUCCESS, shifted))
+
+
+def blown_chance(effective_chance: int, band: int = ROUGH_BAND) -> int:
+    """Percent chance this call blows the job outright.
+
+    Not the same as 100 - success: a miss inside the stage's rough band only
+    goes rough and the job continues. This is the part players actually need
+    to see, so pass the stage's own band.
+    """
+    return max(0, 100 - min(100, effective_chance + band))
 
 
 def blown_severity(stage_index: int, roll: int, chance: int) -> str:
@@ -298,7 +350,13 @@ def blown_severity(stage_index: int, roll: int, chance: int) -> str:
 
 
 # Getting blown at a later stage means you were holding more when it went bad.
-BLOWN_STAGE_TAKE = {0: 0.0, 1: 0.15, 2: 0.35}
+#
+# These are fractions of the full score, so they scale with the payout - which
+# is exactly the trap they fell into. At the old 3.5-5k score, 15% was a small
+# consolation; at 15-20k the same 15% pays more than a clean run used to, and
+# a blown job stopped being a loss at all. Keep these low enough that a failed
+# heist still costs more than the buy-in.
+BLOWN_STAGE_TAKE = {0: 0.0, 1: 0.08, 2: 0.20}
 
 
 def blown_take(stage_index: int, full_take: int) -> int:
@@ -309,3 +367,197 @@ def describe_odds(approach_key: str, npc_ids: list, player_count: int = 1) -> st
     chance = calculate_success(approach_key, npc_ids, player_count)
     crew = ", ".join(NPC_CREW[n]["name"] for n in npc_ids if n in NPC_CREW) or "nobody"
     return f"{chance}% — crew: {crew}"
+
+
+# --- The cops -------------------------------------------------------------
+# Fires between the vault and the escape, when the crew is holding everything.
+#
+# This is a SEPARATE contest from the stage rolls, and that's the whole point.
+# Stage success is clamped at MAX_SUCCESS (80), and stealth already starts at
+# 75 - so a flat "+N% success per gun" would be swallowed by the ceiling and
+# an expensive gun would do visibly nothing. Here there's no ceiling in the
+# way, so gun tier has room to matter.
+
+# The board is 4 rows of 5. The 5th row is reserved for Take Cover, since a
+# Discord message caps out at 25 components total.
+GRID_ROWS = 4
+GRID_COLS = 5
+GRID_CELLS = GRID_ROWS * GRID_COLS
+
+CELL_EMPTY = "empty"
+CELL_COP = "cop"
+CELL_BYSTANDER = "bystander"
+
+# What each gun is worth in a firefight. This is the authoritative list of
+# what counts as a gun - cogs/gunman.py reads it so the two can't drift.
+GUN_SHOTS = {
+    "p250": 3,
+    "five_seven": 5,
+}
+
+BYSTANDERS = 4          # civilians on the board. Hitting one costs you.
+BYSTANDER_COST = 1      # counts against you as if a cop got through
+
+COP_CLEAN = "clean"      # every cop down
+COP_HELD = "held"        # most of them
+COP_PUSHED = "pushed"    # they got the better of it
+COP_OVERRUN = "overrun"  # you barely fired
+
+# What surviving the cops does to your escape odds. Holding them off buys you
+# a clean run at the door; getting pushed back means you're leaving hot.
+COP_ESCAPE_MODIFIER = {
+    COP_CLEAN: 25,
+    COP_HELD: 10,
+    COP_PUSHED: -10,
+    COP_OVERRUN: -25,
+}
+
+# Taking a hit makes the escape worse on top of the tier modifier.
+SHOT_ESCAPE_PENALTY = 10
+
+# How much of the haul survives each outcome.
+COP_LOOT_MULTIPLIER = {
+    COP_CLEAN: 1.0,
+    COP_HELD: 0.85,
+    COP_PUSHED: 0.55,
+    COP_OVERRUN: 0.3,
+}
+
+# Only the worst outcome puts someone down, and never more than one person -
+# a wipe would end the run for a whole crew on one bad stage, which is the
+# opposite of the "you get out, someone's bleeding" tone this is going for.
+MAX_CASUALTIES = 1
+
+
+def cop_count(player_count: int) -> int:
+    """How many cops turn up. Scales with the crew or a big group would walk
+    through the same four officers a solo player struggles with."""
+    return min(3 + max(1, player_count), GRID_CELLS - BYSTANDERS)
+
+
+def shots_for(item_ids) -> int:
+    """Total shots a player gets from what they're carrying. No gun, no shots -
+    they can still Take Cover, they just can't contribute."""
+    return sum(GUN_SHOTS.get(item_id, 0) for item_id in item_ids)
+
+
+def build_grid(player_count: int, rng=random) -> list:
+    """Lays out the board: cops, bystanders, and empty space, shuffled."""
+    cops = cop_count(player_count)
+    cells = ([CELL_COP] * cops
+             + [CELL_BYSTANDER] * BYSTANDERS
+             + [CELL_EMPTY] * (GRID_CELLS - cops - BYSTANDERS))
+    rng.shuffle(cells)
+    return cells
+
+
+def cop_result(cops_down: int, bystanders_hit: int, cops_total: int) -> str:
+    """Grades the firefight. Hitting civilians counts against you, so mashing
+    every button is not a winning strategy."""
+    if cops_total <= 0:
+        return COP_CLEAN
+    effective = max(0, cops_down - bystanders_hit * BYSTANDER_COST)
+    ratio = effective / cops_total
+    if cops_down >= cops_total and bystanders_hit == 0:
+        return COP_CLEAN
+    if ratio >= 0.6:
+        return COP_HELD
+    if ratio >= 0.3:
+        return COP_PUSHED
+    return COP_OVERRUN
+
+
+def cop_escape_modifier(result: str, someone_shot: bool) -> int:
+    modifier = COP_ESCAPE_MODIFIER.get(result, 0)
+    if someone_shot:
+        modifier -= SHOT_ESCAPE_PENALTY
+    return modifier
+
+
+def cop_loot_multiplier(result: str) -> float:
+    return COP_LOOT_MULTIPLIER.get(result, 1.0)
+
+
+def cop_casualties(result: str, exposed: list, rng=random) -> list:
+    """Who takes a hit. At most MAX_CASUALTIES, and only when it goes badly.
+
+    `exposed` is everyone who didn't take cover - which is what makes the
+    Take Cover button worth pressing for a player with no gun to fire.
+    """
+    if result != COP_OVERRUN or not exposed:
+        return []
+    return rng.sample(list(exposed), min(MAX_CASUALTIES, len(exposed)))
+
+
+# --- Betrayal -------------------------------------------------------------
+# Only offered at the final (escape) stage, and only pays off if the crew
+# actually gets out clean or rough - if the whole job gets blown nobody is
+# escaping with anything, betrayer included, so there's nothing to resolve.
+#
+# The roll itself is deliberately unaided: no crew bonus, no player-count
+# bonus. Betraying is something you do alone, improvising, while everyone
+# else is still following the plan.
+BETRAY_CHANCE_PENALTY = 25
+BETRAY_BONUS_PCT = 0.20   # skimmed off the top of the pot per successful betrayer
+BETRAY_KEEP_PCT = 0.20    # what a caught betrayer keeps of their own normal share
+
+
+def betray_chance(approach_key: str) -> int:
+    base = APPROACHES[approach_key]["success"]
+    return max(MIN_SUCCESS, base - BETRAY_CHANCE_PENALTY)
+
+
+def roll_betrayal(approach_key: str, rng=random) -> bool:
+    chance = betray_chance(approach_key)
+    return rng.randint(1, 100) <= chance
+
+
+def resolve_payouts(after_cuts: int, player_ids: list, betrayals: dict) -> dict:
+    """Splits the post-NPC-cut pot, accounting for anyone who tried to betray
+    the crew at the escape stage.
+
+    betrayals: {user_id: True/False} - True means they got away with it,
+    False means they got caught. Anyone not in the dict played it straight.
+
+    A successful betrayer skims BETRAY_BONUS_PCT of the whole pot for
+    themselves, on top of a normal split of what's left - so a loyal crew's
+    share quietly shrinks without them knowing why. A caught betrayer keeps
+    only BETRAY_KEEP_PCT of what their normal share would have been; the rest
+    is handed ONLY to the loyal crew, split evenly on top of their own share.
+    Nothing is minted or destroyed - it's always somebody's original slice
+    moving to somebody else, modulo the same rounding-down every split here
+    already accepts.
+    """
+    count = len(player_ids)
+    if count == 0:
+        return {}
+
+    successful = {p for p, ok in betrayals.items() if ok is True}
+    failed = {p for p, ok in betrayals.items() if ok is False}
+    loyal = [p for p in player_ids if p not in betrayals]
+
+    bonus_each = int(after_cuts * BETRAY_BONUS_PCT)
+    total_skim = min(bonus_each * len(successful), after_cuts)
+    # base_share is what everyone's "normal" cut is worth once successful
+    # betrayers have already skimmed their bonus off the top - a failed
+    # betrayer's own reference share has to come from this, not the
+    # pre-skim pot, or the two calculations disagree about how much money
+    # actually exists and payouts can exceed the pot.
+    base_share = (after_cuts - total_skim) // count if count else 0
+
+    keep_each = int(base_share * BETRAY_KEEP_PCT)
+    forfeit_each = base_share - keep_each
+    total_forfeit = forfeit_each * len(failed)
+    # If nobody stayed loyal, the forfeit has nowhere to go - lost, same as
+    # any other rounding remainder in this system.
+    forfeit_bonus = total_forfeit // len(loyal) if loyal else 0
+
+    payouts = {}
+    for pid in player_ids:
+        if pid in successful:
+            payouts[pid] = base_share + bonus_each
+        elif pid in failed:
+            payouts[pid] = keep_each
+        else:
+            payouts[pid] = base_share + forfeit_bonus
+    return payouts

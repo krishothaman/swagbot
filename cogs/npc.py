@@ -9,6 +9,7 @@ from discord.ext import commands
 import database as db
 from ui import build_items_embed
 from cogs.housing import LandlordView, landlord_embed, LANDLORD_ID
+from cogs.gunman import gunman_intro, GUNMAN_ID
 from cogs.quests import accept_quest, turn_in_quest, describe_rewards, describe_progress
 
 
@@ -251,6 +252,7 @@ class NPC(commands.Cog):
     @app_commands.choices(npc=[
         app_commands.Choice(name="Weird looking merchant", value="shady_merchant"),
         app_commands.Choice(name="Landlord", value=LANDLORD_ID),
+        app_commands.Choice(name="The Gun Man", value=GUNMAN_ID),
     ])
     async def talk(self, interaction: discord.Interaction, npc: app_commands.Choice[str]):
         npc_data = await db.get_npc(npc.value)
@@ -265,6 +267,12 @@ class NPC(commands.Cog):
             embed = await landlord_embed(interaction.user.id, interaction.guild.id)
             view = LandlordView(interaction.user.id, interaction.guild.id)
             await interaction.response.send_message(embed=embed, view=view)
+            return
+
+        # The gun man is level-gated - a None view means he turned you away.
+        if npc_id == GUNMAN_ID:
+            embed, view = await gunman_intro(interaction.user.id, interaction.guild.id)
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=view is None)
             return
 
         flavor = await db.get_npc_flavor_lines(npc_id)

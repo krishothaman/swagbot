@@ -5,6 +5,14 @@ from config import DB_PATH, STARTING_BALANCE
 
 _db: aiosqlite.Connection | None = None
 
+# User IDs that skip every cooldown and the shot lockout, toggled by
+# /dev nocooldown. Enforced inside get_cooldown() and
+# get_incapacitated_remaining() rather than at each call site: every timing
+# gate in the bot already reads through those two functions, so this is the
+# one place that can't miss one. In-memory, seeded at startup from
+# DEV_NO_COOLDOWN in .env.
+NO_COOLDOWN: set[int] = set()
+
 
 async def _ensure_columns(db: aiosqlite.Connection, table: str, columns: dict):
     """Adds any missing columns to an existing table.
@@ -170,20 +178,16 @@ async def seed_npc_data():
          "i got the stuff, what do you want?"),
     )
 
-    items = [
-        ("lockpick", "Lockpick", 150, "shady_merchant", "yk what to do with it."),
-        ("fake_id", "Fake ID", 300, "shady_merchant", "you can use it for whatever the heck you want."),
-        ("lucky_coin", "Lucky Coin", 500, "shady_merchant", "hehe."),
-    ]
-    await db.executemany(
-        "INSERT OR IGNORE INTO items (item_id, name, price, npc_id, description) VALUES (?, ?, ?, ?, ?)",
-        items,
-    )
-
     await db.execute(
         "INSERT OR IGNORE INTO npcs (npc_id, name, role, greeting_text) VALUES (?, ?, ?, ?)",
         ("landlord", "The Landlord", "landlord",
          "You're standing in my lobby. State your business."),
+    )
+
+    await db.execute(
+        "INSERT OR IGNORE INTO npcs (npc_id, name, role, greeting_text) VALUES (?, ?, ?, ?)",
+        ("gun_man", "The Gun Man", "arms dealer",
+         "HEY. Hey hey hey. Look at this face."),
     )
 
     # Flavor lines get picked at random when you talk to an NPC. The merchant's
@@ -193,10 +197,46 @@ async def seed_npc_data():
         ("shady_merchant", "There has always been a fifth floor."),
         ("shady_merchant", "you look like someone who pays retail. dont be that guy."),
         ("shady_merchant", "i dont ask where you got it. dont ask where i got it."),
+        ("gun_man", "I don't hide the guns. Why would I hide the guns? They're the good part."),
+        ("gun_man", "You hear that? No? GOOD. That means it worked."),
+        ("gun_man", "I've been shot four times. Ask me where. ASK ME."),
+        ("gun_man", "Tight. Everything's tight. That's a good thing, that's a GOOD thing."),
     ]
     await db.executemany(
         "INSERT OR IGNORE INTO npc_flavor (npc_id, line) VALUES (?, ?)", flavor
     )
+
+    await db.commit()
+
+
+async def seed_item_data():
+    """Loads item content from item_data.py.
+
+    Uses INSERT OR REPLACE (not OR IGNORE) so editing a price in that file
+    actually applies on the next boot - with OR IGNORE the row already exists
+    and every edit is silently dropped, which is the trap quests used to have.
+
+    Removing an item from the file deletes it here, and takes any copies
+    players are holding with it. Leaving those rows behind would be worse:
+    get_inventory INNER JOINs items, so an orphaned row is invisible in game
+    but still occupies a house storage slot forever.
+    """
+    from item_data import ITEMS
+
+    db = get_db()
+    await db.executemany(
+        """INSERT OR REPLACE INTO items (item_id, name, price, npc_id, description)
+           VALUES (?, ?, ?, ?, ?)""",
+        [
+            (i["item_id"], i["name"], i["price"], i["npc_id"], i["description"])
+            for i in ITEMS
+        ],
+    )
+
+    keep = [i["item_id"] for i in ITEMS]
+    placeholders = ",".join("?" * len(keep))
+    for table in ("items", "inventory", "house_storage"):
+        await db.execute(f"DELETE FROM {table} WHERE item_id NOT IN ({placeholders})", keep)
 
     await db.commit()
 
@@ -673,11 +713,12 @@ async def set_xp(user_id: int, guild_id: int, amount: int):
 
 
 async def reset_cooldowns(user_id: int, guild_id: int):
-    """Zeroes every cooldown so /daily and /work are immediately usable again."""
+    """Zeroes every cooldown so /daily, /work and /heist are usable again."""
     await ensure_user(user_id, guild_id)
     db = get_db()
     await db.execute(
-        """UPDATE users SET last_daily = 0, last_work = 0, last_message_xp = 0
+        """UPDATE users SET last_daily = 0, last_work = 0, last_message_xp = 0,
+                            last_heist = 0
            WHERE user_id = ? AND guild_id = ?""",
         (user_id, guild_id),
     )
@@ -693,8 +734,10 @@ async def get_all_items():
 
 
 async def get_cooldown(user_id: int, guild_id: int, field: str) -> float:
-    """field must be one of: last_daily, last_work, last_message_xp
+    """field must be one of: last_daily, last_work, last_message_xp, last_heist
     Returns unix timestamp of last use (0 if never used)."""
+    if user_id in NO_COOLDOWN:
+        return 0  # never used = ready now
     await ensure_user(user_id, guild_id)
     db = get_db()
     async with db.execute(
@@ -731,6 +774,8 @@ async def set_incapacitated(user_id: int, guild_id: int, seconds: float):
 async def get_incapacitated_remaining(user_id: int, guild_id: int) -> float:
     """Seconds left on the lockout, 0 if free. Read on every command, so it
     deliberately does NOT call ensure_user - an unknown user isn't locked."""
+    if user_id in NO_COOLDOWN:
+        return 0
     db = get_db()
     async with db.execute(
         "SELECT incapacitated_until FROM users WHERE user_id = ? AND guild_id = ?",

@@ -17,7 +17,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import database as db
-from config import OWNER_ID
+from config import OWNER_ID, DEV_NO_COOLDOWN
 from cogs.leveling import apply_level_up
 
 log = logging.getLogger("bot")
@@ -127,14 +127,37 @@ class Dev(commands.Cog):
             ephemeral=True,
         )
 
-    @dev.command(name="resetcooldowns", description="[owner] Clear daily/work/xp cooldowns")
+    @dev.command(name="resetcooldowns", description="[owner] Clear daily/work/xp/heist cooldowns")
     @owner_only()
     @app_commands.describe(member="Defaults to you")
     async def resetcooldowns(self, interaction: discord.Interaction, member: discord.Member = None):
         target = self._target(interaction, member)
         await db.reset_cooldowns(target.id, interaction.guild.id)
         await interaction.response.send_message(
-            f"✅ Cooldowns cleared for {target.display_name}. /daily and /work are ready.",
+            f"✅ Cooldowns cleared for {target.display_name}. /daily, /work and /heist are ready.",
+            ephemeral=True,
+        )
+
+    @dev.command(name="nocooldown", description="[owner] Toggle skipping ALL cooldowns and lockouts")
+    @owner_only()
+    @app_commands.describe(on="Leave blank to flip it", member="Defaults to you")
+    async def nocooldown(self, interaction: discord.Interaction, on: bool = None,
+                         member: discord.Member = None):
+        """Exempts someone from every cooldown *and* the shot lockout, for as
+        long as the bot stays up. Set DEV_NO_COOLDOWN=1 in .env to have it on
+        from boot instead of re-running this after every restart."""
+        target = self._target(interaction, member)
+        enable = (target.id not in db.NO_COOLDOWN) if on is None else on
+
+        if enable:
+            db.NO_COOLDOWN.add(target.id)
+        else:
+            db.NO_COOLDOWN.discard(target.id)
+
+        state = "**OFF** — nothing is on a timer" if enable else "**ON** — timers apply again"
+        await interaction.response.send_message(
+            f"✅ Cooldowns for {target.display_name}: {state}\n"
+            f"*(in-memory — clears if the bot restarts unless DEV_NO_COOLDOWN=1 is in .env)*",
             ephemeral=True,
         )
 
@@ -292,4 +315,7 @@ class Dev(commands.Cog):
 
 
 async def setup(bot: commands.Bot):
+    if DEV_NO_COOLDOWN and OWNER_ID is not None:
+        db.NO_COOLDOWN.add(OWNER_ID)
+        log.warning(f"DEV_NO_COOLDOWN is on - owner {OWNER_ID} skips all cooldowns")
     await bot.add_cog(Dev(bot))

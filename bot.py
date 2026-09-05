@@ -6,7 +6,8 @@ from discord import app_commands
 from discord.ext import commands
 
 from config import DISCORD_TOKEN, COMMAND_PREFIX, SHOT_BLOCKED_COMMANDS
-from database import init_db, seed_npc_data, seed_house_data, seed_quest_data
+from database import (init_db, seed_npc_data, seed_item_data, seed_house_data,
+                      seed_quest_data)
 import database as db
 
 logging.basicConfig(level=logging.INFO)
@@ -88,6 +89,7 @@ async def load_cogs():
 async def main():
     await init_db()
     await seed_npc_data()
+    await seed_item_data()   # after NPCs: items reference them
     await seed_house_data()
     await seed_quest_data()
     await load_cogs()
