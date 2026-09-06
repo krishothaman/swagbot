@@ -67,6 +67,7 @@ async def init_db():
             last_work REAL NOT NULL DEFAULT 0,
             last_message_xp REAL NOT NULL DEFAULT 0,
             last_heist REAL NOT NULL DEFAULT 0,
+            last_gig REAL NOT NULL DEFAULT 0,
             incapacitated_until REAL NOT NULL DEFAULT 0,
             PRIMARY KEY (user_id, guild_id)
         )
@@ -75,6 +76,7 @@ async def init_db():
     await _ensure_columns(_db, "users", {
         "last_heist": "REAL NOT NULL DEFAULT 0",
         "incapacitated_until": "REAL NOT NULL DEFAULT 0",
+        "last_gig": "REAL NOT NULL DEFAULT 0",
     })
     await _db.execute("""
         CREATE TABLE IF NOT EXISTS npcs (
@@ -815,7 +817,8 @@ async def get_all_items():
 
 
 async def get_cooldown(user_id: int, guild_id: int, field: str) -> float:
-    """field must be one of: last_daily, last_work, last_message_xp, last_heist
+    """field must be one of: last_daily, last_work, last_message_xp, last_heist,
+    last_gig
     Returns unix timestamp of last use (0 if never used)."""
     if user_id in NO_COOLDOWN:
         return 0  # never used = ready now
@@ -831,12 +834,27 @@ async def get_cooldown(user_id: int, guild_id: int, field: str) -> float:
 
 async def set_cooldown(user_id: int, guild_id: int, field: str):
     """Stamps `field` with the current time. field must be one of:
-    last_daily, last_work, last_message_xp"""
+    last_daily, last_work, last_message_xp, last_heist, last_gig"""
     await ensure_user(user_id, guild_id)
     db = get_db()
     await db.execute(
         f"UPDATE users SET {field} = ? WHERE user_id = ? AND guild_id = ?",
         (time.time(), user_id, guild_id),
+    )
+    await db.commit()
+
+
+async def set_cooldown_at(user_id: int, guild_id: int, field: str, when: float):
+    """Stamps `field` at a specific time rather than now.
+
+    Exists so a seven-day cooldown can be tested without waiting seven days -
+    set_cooldown() can only ever mean "now". Same field whitelist applies.
+    """
+    await ensure_user(user_id, guild_id)
+    db = get_db()
+    await db.execute(
+        f"UPDATE users SET {field} = ? WHERE user_id = ? AND guild_id = ?",
+        (when, user_id, guild_id),
     )
     await db.commit()
 
