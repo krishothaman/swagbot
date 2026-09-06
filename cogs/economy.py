@@ -6,8 +6,8 @@ from discord.ext import commands
 
 import database as db
 from config import (DAILY_REWARD, DAILY_COOLDOWN_SECONDS, WORK_MIN_REWARD, WORK_MAX_REWARD,
-                    WORK_COOLDOWN_SECONDS, GIG_COOLDOWN_SECONDS, GIG_MIN_REWARD,
-                    GIG_MAX_REWARD, GIG_XP)
+                    WORK_COOLDOWN_SECONDS, WEEKLY_COOLDOWN_SECONDS, WEEKLY_MIN_REWARD,
+                    WEEKLY_MAX_REWARD, WEEKLY_XP)
 from cogs.quests import record_event
 from cogs.housing import pay_with_boost, house_cut
 from cogs.leveling import apply_level_up
@@ -20,10 +20,10 @@ JOBS = [
     "freelance coder", "mechanic", "chef", "taxi driver",
 ]
 
-# A gig is a week's work, so it gets a story rather than a job title. One of
+# A weekly job is a week's work, so it gets a story rather than a job title. One of
 # these is rolled per claim - the payout is identical either way, this is only
 # so claiming it seven days running doesn't read like the same button twice.
-GIGS = [
+WEEKLY_JOBS = [
     "ran security for a warehouse nobody wanted to talk about",
     "drove a van across three states and asked zero questions",
     "did a week of night shifts at the docks",
@@ -35,29 +35,29 @@ GIGS = [
 ]
 
 
-async def claim_gig(user_id: int, guild_id: int):
+async def claim_weekly(user_id: int, guild_id: int):
     """The weekly payout. Returns (paid, message).
 
     Split out of the command so the seven-day cooldown can be tested without a
     Discord interaction - same shape as housing.collect_rent. Pays through
-    pay_with_boost, so a house lifts the gig exactly like it lifts /work.
+    pay_with_boost, so a house lifts it exactly like it lifts /work.
     """
-    last_gig = await db.get_cooldown(user_id, guild_id, "last_gig")
-    elapsed = time.time() - last_gig
+    last_weekly = await db.get_cooldown(user_id, guild_id, "last_weekly")
+    elapsed = time.time() - last_weekly
 
-    if elapsed < GIG_COOLDOWN_SECONDS:
-        remaining = GIG_COOLDOWN_SECONDS - elapsed
-        return False, (f"You've already done your gig this week. "
+    if elapsed < WEEKLY_COOLDOWN_SECONDS:
+        remaining = WEEKLY_COOLDOWN_SECONDS - elapsed
+        return False, (f"You've already worked this week. "
                        f"Next one in **{format_seconds(remaining)}**.")
 
-    earnings = random.randint(GIG_MIN_REWARD, GIG_MAX_REWARD)
-    gig = random.choice(GIGS)
+    earnings = random.randint(WEEKLY_MIN_REWARD, WEEKLY_MAX_REWARD)
+    job = random.choice(WEEKLY_JOBS)
     base, bonus, new_balance = await pay_with_boost(user_id, guild_id, earnings)
-    xp, level = await db.add_xp(user_id, guild_id, GIG_XP)
+    xp, level = await db.add_xp(user_id, guild_id, WEEKLY_XP)
     await apply_level_up(user_id, guild_id, xp, level)
     # Stamped only after the payout lands, so a failure can't burn the week.
-    await db.set_cooldown(user_id, guild_id, "last_gig")
-    return True, (f"You {gig} and cleared **{base}** coins{house_cut(bonus)}. "
+    await db.set_cooldown(user_id, guild_id, "last_weekly")
+    return True, (f"You {job} and cleared **{base}** coins{house_cut(bonus)}. "
                   f"New balance: **{new_balance}**")
 
 
@@ -118,9 +118,9 @@ class Economy(commands.Cog):
             f"New balance: **{new_balance}**"
         )
 
-    @app_commands.command(name="gig", description="Take a week-long job. One per week, pays properly.")
-    async def gig(self, interaction: discord.Interaction):
-        paid, message = await claim_gig(interaction.user.id, interaction.guild.id)
+    @app_commands.command(name="weekly", description="Claim your weekly payout - a week-long job, once every 7 days")
+    async def weekly(self, interaction: discord.Interaction):
+        paid, message = await claim_weekly(interaction.user.id, interaction.guild.id)
         if not paid:
             await interaction.response.send_message(message, ephemeral=True)
             return

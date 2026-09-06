@@ -28,18 +28,18 @@ DAILY_REWARD = 200
 WORK_MIN_REWARD = 50
 WORK_MAX_REWARD = 150
 
-# The income ladder: /work often for a little, /daily for a bit more, /gig once
-# a week for a real payout. The spacing is the design - at a 30s cooldown /work
-# paid ~18,000/hour, which made every paced reward in the game (daily, gig, rent,
+# The income ladder: /work often for a little, /daily for a bit more, /weekly
+# once a week for a real payout. The spacing is the design - at a 30s cooldown /work
+# paid ~18,000/hour, which made every paced reward in the game (daily, weekly, rent,
 # even the house boost) worth less than a few minutes of clicking.
 WORK_COOLDOWN_SECONDS = 60 * 15          # 15 minutes
 DAILY_COOLDOWN_SECONDS = 60 * 60 * 24    # 24 hours
-GIG_COOLDOWN_SECONDS = 60 * 60 * 24 * 7  # 7 days
+WEEKLY_COOLDOWN_SECONDS = 60 * 60 * 24 * 7  # 7 days
 
-# A gig must clear an hour of farmed /work (4 x 150 = 600) or nobody runs it.
-GIG_MIN_REWARD = 1000
-GIG_MAX_REWARD = 1500
-GIG_XP = 150
+# /weekly must clear an hour of farmed /work (4 x 150 = 600) or nobody runs it.
+WEEKLY_MIN_REWARD = 1000
+WEEKLY_MAX_REWARD = 1500
+WEEKLY_XP = 150
 
 # --- Blackjack / games constants ---
 MIN_BET = 10
